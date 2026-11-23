@@ -20,7 +20,7 @@ target_link_libraries(DungeonEscape PRIVATE SFML::Graphics)
 add_custom_command(TARGET DungeonEscape POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         "${CMAKE_SOURCE_DIR}/Assets"
-        "$<TARGET_FILE_DIR:DungeonEscape>/assets"
+        "$<TARGET_FILE_DIR:DungeonEscape>/Assets"
     COMMENT "Copying game assets next to DungeonEscape"
 )
 
