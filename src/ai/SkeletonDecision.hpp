@@ -32,8 +32,12 @@ namespace ai
         attackSequence->addChild(std::make_unique<ConditionNode>(
             [](EnemyContext& context)
             {
-                return distanceBetween(context.enemyPosition, context.playerPosition)
-                    <= context.attackRange;
+                const float range = context.attackRange +
+                    (context.currentAction == EnemyContext::Action::Attack &&
+                        context.attackCycleActive
+                        ? context.attackRangeBuffer : 0.f);
+                return context.hasLineOfSight &&
+                    distanceBetween(context.enemyPosition, context.playerPosition) <= range;
             }));
         attackSequence->addChild(std::make_unique<ActionNode>(
             [](EnemyContext& context, float)

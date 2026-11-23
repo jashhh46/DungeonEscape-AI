@@ -17,9 +17,12 @@ namespace ai
         float moveSpeed = 100.f;
         float detectionRange = 250.f;
         float attackRange = 60.f;
+        float attackRangeBuffer = 10.f;
 
         // Can the enemy currently see the player?
         bool playerVisible = false;
+        bool hasLineOfSight = false;
+        bool attackCycleActive = false;
 
         // Movement requested by the Behaviour Tree
         sf::Vector2f moveDirection{0.f, 0.f};

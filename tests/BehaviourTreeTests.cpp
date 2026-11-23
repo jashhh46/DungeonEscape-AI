@@ -1,10 +1,14 @@
 #include "ai/BehaviourTree.hpp"
+#include "ai/AStarPathfinder.hpp"
 #include "ai/CompositeNodes.hpp"
 #include "ai/EnemyContext.hpp"
 #include "ai/GridCollision.hpp"
 #include "ai/LeafNodes.hpp"
+#include "ai/SkeletonCombat.hpp"
 #include "ai/SkeletonDecision.hpp"
+#include "ai/SkeletonPathfinding.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <functional>
@@ -148,6 +152,8 @@ namespace
         ai::BehaviourTree tree;
         ai::buildSkeletonBehaviourTree(tree);
         ai::EnemyContext context{};
+        context.detectionRange = 375.f;
+        context.hasLineOfSight = true;
         context.enemyPosition = { 100.f, 100.f };
         context.moveDirection = { 2.f, 3.f };
 
@@ -167,12 +173,55 @@ namespace
                "Skeleton selects Chase inside detection range");
         expect(context.playerVisible, "Skeleton sees player within detection range");
 
-        context.playerPosition = { 400.f, 100.f };
+        context.playerPosition = { 450.f, 100.f };
+        ai::updateSkeletonVisibility(context);
+        tree.tick(context, 0.016f);
+        expect(context.currentAction == ai::EnemyContext::Action::Chase && context.playerVisible,
+               "Skeleton detects the Player at 350 world units with the 375-unit range");
+
+        context.playerPosition = { 475.f, 100.f };
+        ai::updateSkeletonVisibility(context);
+        expect(context.playerVisible,
+               "Detection includes the 375-unit world-space boundary");
+        context.playerPosition = { 476.f, 100.f };
+        ai::updateSkeletonVisibility(context);
+        expect(!context.playerVisible,
+               "Detection ends just beyond 375 world units");
+
+        context.playerPosition = { 500.f, 100.f };
         ai::updateSkeletonVisibility(context);
         tree.tick(context, 0.016f);
         expect(context.currentAction == ai::EnemyContext::Action::Idle,
                "Skeleton selects Idle outside detection range");
         expect(!context.playerVisible, "Skeleton does not see player outside detection range");
+
+        context.playerPosition = { 161.f, 100.f };
+        ai::updateSkeletonVisibility(context);
+        tree.tick(context, 0.016f);
+        expect(context.currentAction == ai::EnemyContext::Action::Chase,
+               "Attack hysteresis does not enter Attack above the 60-unit start range");
+        context.playerPosition = { 165.f, 100.f };
+        ai::updateSkeletonVisibility(context);
+        tree.tick(context, 0.016f);
+        expect(context.currentAction == ai::EnemyContext::Action::Chase,
+               "Skeleton stays in Chase when still outside the Attack entry range");
+        context.playerPosition = { 159.f, 100.f };
+        ai::updateSkeletonVisibility(context);
+        tree.tick(context, 0.016f);
+        expect(context.currentAction == ai::EnemyContext::Action::Attack,
+               "Skeleton enters Attack inside the configured range");
+        context.attackCycleActive = true;
+        context.playerPosition = { 165.f, 100.f };
+        ai::updateSkeletonVisibility(context);
+        tree.tick(context, 0.016f);
+        expect(context.currentAction == ai::EnemyContext::Action::Attack,
+               "Skeleton finishes an active attack inside its hysteresis buffer");
+        context.attackCycleActive = false;
+        context.playerPosition = { 171.f, 100.f };
+        ai::updateSkeletonVisibility(context);
+        tree.tick(context, 0.016f);
+        expect(context.currentAction == ai::EnemyContext::Action::Chase,
+               "Skeleton returns to Chase after leaving the Attack buffer");
     }
 
     void testSkeletonMovement()
@@ -195,6 +244,7 @@ namespace
         stopContext.enemyPosition = { 40.f, 40.f };
         stopContext.playerPosition = { 80.f, 40.f };
         stopContext.moveDirection = { 1.f, 0.f };
+        stopContext.hasLineOfSight = true;
         ai::updateSkeletonVisibility(stopContext);
         tree.tick(stopContext, 0.1f);
         const sf::Vector2f stoppedMovement = ai::moveSkeleton(
@@ -221,6 +271,7 @@ namespace
         collisionContext.playerPosition = { 120.f, 52.f };
         collisionContext.attackRange = 20.f;
         collisionContext.detectionRange = 200.f;
+        collisionContext.hasLineOfSight = true;
         collisionContext.moveSpeed = 100.f;
         ai::updateSkeletonVisibility(collisionContext);
         tree.tick(collisionContext, 0.1f);
@@ -233,6 +284,251 @@ namespace
         expect(!canOccupy({ 7.f, 20.f }),
                "Foot collision rejects positions beyond the dungeon boundary");
     }
+
+    void testAStarPathfinding()
+    {
+        std::array<std::array<int, 5>, 5> grid{};
+        grid[1][2] = 1;
+        grid[2][2] = 1;
+        grid[3][2] = 1;
+        const auto walkable = [&grid](ai::GridCell cell)
+        {
+            return cell.column >= 0 && cell.column < 5 && cell.row >= 0 && cell.row < 5 &&
+                grid[cell.row][cell.column] == 0;
+        };
+
+        const std::vector<ai::GridCell> path = ai::findAStarPath(
+            { 0, 2 }, { 4, 2 }, grid, walkable);
+        expect(!path.empty() && path.front() == ai::GridCell{ 0, 2 } &&
+               path.back() == ai::GridCell{ 4, 2 },
+               "A* finds a route around a wall to the requested destination");
+        expect(ai::isPathValid(path, walkable),
+               "A* path uses clear cells connected in four directions");
+        expect(path.size() == 9,
+               "Manhattan A* chooses a shortest route around the wall");
+
+        grid[0][2] = 1;
+        grid[4][2] = 1;
+        expect(!ai::isPathValid(path, walkable),
+               "Path validation rejects a route after a cell becomes blocked");
+
+        std::array<std::array<int, 5>, 5> sealedGrid{};
+        for (int row = 0; row < 5; ++row)
+            sealedGrid[row][2] = 1;
+        const auto sealedWalkable = [&sealedGrid](ai::GridCell cell)
+        {
+            return cell.column >= 0 && cell.column < 5 && cell.row >= 0 && cell.row < 5 &&
+                sealedGrid[cell.row][cell.column] == 0;
+        };
+        expect(ai::findAStarPath({ 0, 2 }, { 4, 2 }, sealedGrid, sealedWalkable).empty(),
+               "A* returns no path when a wall fully separates the destination");
+    }
+
+    void testCentralPassageNavigation()
+    {
+        constexpr int columns = 28;
+        constexpr int rows = 16;
+        constexpr float tileSize = 128.f;
+        std::array<std::array<int, columns>, rows> dungeon{};
+        for (int row = 0; row < rows; ++row)
+        {
+            for (int column = 0; column < columns; ++column)
+            {
+                if (row == 0 || row == rows - 1 || column == 0 || column == columns - 1)
+                    dungeon[row][column] = 1;
+            }
+        }
+        for (int row = 1; row < rows - 1; ++row)
+        {
+            if (row < 6 || row > 9)
+            {
+                dungeon[row][13] = 1;
+                dungeon[row][14] = 1;
+            }
+        }
+        dungeon[6][11] = 1;
+        dungeon[8][16] = 1;
+
+        const auto walkable = [&dungeon, columns, rows, tileSize](ai::GridCell cell)
+        {
+            if (cell.column < 0 || cell.column >= columns || cell.row < 0 || cell.row >= rows)
+                return false;
+            const sf::Vector2f ground = ai::gridCellWaypoint(cell, tileSize, 104.f);
+            return ai::isFootprintClear(ground, 28.f, 18.f, dungeon, tileSize,
+                [](int tile) { return tile == 0; });
+        };
+        const auto path = ai::findAStarPath({ 10, 7 }, { 17, 7 }, dungeon, walkable);
+        expect(!path.empty() && ai::isPathValid(path, walkable),
+               "A* finds a valid route between rooms with obstacles nearby");
+        const bool usesOpening = std::any_of(path.begin(), path.end(), [](ai::GridCell cell)
+        {
+            return (cell.column == 13 || cell.column == 14) &&
+                cell.row >= 6 && cell.row <= 9;
+        });
+        expect(usesOpening,
+               "A* routes through the four-row central passage, not through the divider");
+
+        const auto canOccupy = [&dungeon, tileSize](const sf::Vector2f& ground)
+        {
+            return ai::isFootprintClear(ground, 28.f, 18.f, dungeon, tileSize,
+                [](int tile) { return tile == 0; });
+        };
+        expect(ai::hasClearLineOfSight({ 10.5f * tileSize, 7.f * tileSize + 104.f },
+                   { 17.5f * tileSize, 7.f * tileSize + 104.f }, canOccupy),
+               "Ground-position line of sight stays clear through the passage");
+        expect(!ai::hasClearLineOfSight({ 10.5f * tileSize, 5.f * tileSize + 104.f },
+                    { 17.5f * tileSize, 5.f * tileSize + 104.f }, canOccupy),
+               "The central divider blocks attacks outside its passage opening");
+    }
+
+    void testSkeletonCombat()
+    {
+        ai::PlayerHealth player;
+        ai::SkeletonAttackState attack;
+        auto update = [&](float delta, float distance = 50.f, bool lineOfSight = true)
+        {
+            return ai::updateSkeletonAttack(attack, player, true, distance,
+                60.f, lineOfSight, delta);
+        };
+
+        expect(player.current == 100, "Player starts with 100 HP");
+        expect(update(0.125f).frame == 1 && player.current == 100,
+               "Skeleton attack begins with its anticipation frame");
+        const ai::SkeletonAttackUpdate hit = update(0.125f);
+        expect(hit.frame == 2 && hit.damageApplied && player.current == 90,
+               "Attack hit frame deals 10 damage once");
+        update(0.125f);
+        expect(player.current == 90,
+               "One attack animation cannot damage the Player more than once");
+
+        for (int i = 0; i < 7; ++i)
+            update(0.125f);
+        expect(player.current == 90,
+               "One-second cooldown prevents another hit before it expires");
+
+        ai::SkeletonAttackState missedAttack;
+        ai::PlayerHealth unhurtPlayer;
+        ai::updateSkeletonAttack(missedAttack, unhurtPlayer, true, 50.f, 60.f, true, 0.125f);
+        const ai::SkeletonAttackUpdate missedHit = ai::updateSkeletonAttack(
+            missedAttack, unhurtPlayer, true, 65.f, 60.f, false, 0.125f);
+        expect(!missedHit.damageApplied && unhurtPlayer.current == 100,
+               "Hit frame does no damage when the Player moved out of range or behind a wall");
+
+        expect(unhurtPlayer.takeDamage(150) && unhurtPlayer.current == 0 &&
+               !unhurtPlayer.takeDamage(10),
+               "Player health clamps at zero and cannot take damage after defeat");
+    }
+
+    void testSkeletonPathFollowing()
+    {
+        std::array<std::array<int, 4>, 4> grid{};
+        const auto walkable = [&grid](ai::GridCell cell)
+        {
+            return cell.column >= 0 && cell.column < 4 && cell.row >= 0 && cell.row < 4 &&
+                grid[cell.row][cell.column] == 0;
+        };
+        const auto canOccupy = [&grid](const sf::Vector2f& ground)
+        {
+            return ai::isFootprintClear(ground, 10.f, 8.f, grid, 32.f,
+                [](int tile) { return tile == 0; });
+        };
+
+        ai::EnemyContext context{};
+        context.currentAction = ai::EnemyContext::Action::Chase;
+        context.enemyPosition = ai::gridCellCenter({ 0, 0 }, 32.f);
+        context.playerPosition = ai::gridCellCenter({ 3, 0 }, 32.f);
+        context.attackRange = 8.f;
+        context.moveSpeed = 64.f;
+        ai::SkeletonPathState state;
+        const sf::Vector2f firstMovement = ai::followSkeletonPath(
+            context, state, 0.25f, grid, 32.f, walkable, canOccupy);
+        expect(std::abs(firstMovement.x - 16.f) < 0.001f &&
+               std::abs(firstMovement.y) < 0.001f &&
+               context.enemyPosition == sf::Vector2f{ 32.f, 16.f },
+               "Skeleton follows its next grid waypoint using speed and delta time");
+
+        ai::EnemyContext repathContext{};
+        repathContext.currentAction = ai::EnemyContext::Action::Chase;
+        repathContext.enemyPosition = { 60.f, 48.f };
+        repathContext.playerPosition = { 112.f, 48.f };
+        repathContext.moveSpeed = 64.f;
+        ai::SkeletonPathState repathState;
+        repathState.path = { { 1, 1 }, { 0, 1 } };
+        repathState.nextWaypoint = 1;
+        repathState.destination = { 0, 1 };
+        repathState.lastStart = { 1, 1 };
+        repathState.hasAttempted = true;
+        const sf::Vector2f repathMovement = ai::followSkeletonPath(
+            repathContext, repathState, 0.1f, grid, 32.f, walkable, canOccupy);
+        expect(repathState.destination == ai::GridCell{ 3, 1 } && repathMovement.x > 0.f,
+               "Replanning for a new target cell continues forward instead of returning to the old cell centre");
+
+        ai::EnemyContext rangeContext{};
+        rangeContext.currentAction = ai::EnemyContext::Action::Chase;
+        rangeContext.enemyPosition = ai::gridCellCenter({ 0, 0 }, 32.f);
+        rangeContext.playerPosition = ai::gridCellCenter({ 2, 0 }, 32.f);
+        rangeContext.attackRange = 12.f;
+        rangeContext.moveSpeed = 100.f;
+        ai::SkeletonPathState rangeState;
+        ai::followSkeletonPath(rangeContext, rangeState, 0.5f,
+            grid, 32.f, walkable, canOccupy);
+        ai::followSkeletonPath(rangeContext, rangeState, 0.5f,
+            grid, 32.f, walkable, canOccupy);
+        const sf::Vector2f rangeDifference =
+            rangeContext.playerPosition - rangeContext.enemyPosition;
+        expect(std::abs(std::sqrt(rangeDifference.x * rangeDifference.x +
+                       rangeDifference.y * rangeDifference.y) - rangeContext.attackRange) < 0.001f,
+               "Skeleton stops at its attack range while following waypoints");
+
+        context.enemyPosition = ai::gridCellCenter({ 0, 0 }, 32.f);
+        context.moveSpeed = 64.f;
+        ai::SkeletonPathState blockedState;
+        const auto blockedCanOccupy = [](const sf::Vector2f&) { return false; };
+        const sf::Vector2f blockedMovement = ai::followSkeletonPath(
+            context, blockedState, 0.25f, grid, 32.f, walkable, blockedCanOccupy);
+        expect(blockedMovement == sf::Vector2f{ 0.f, 0.f } &&
+               context.enemyPosition == sf::Vector2f{ 16.f, 16.f },
+               "Skeleton collision callback prevents movement through an obstacle");
+
+        // A prop foot box can block a navigation point even when its tile is floor.
+        const sf::Vector2f propGround = ai::gridCellWaypoint({ 1, 0 }, 32.f, 26.f);
+        const auto propBlockedWalkable = [propGround](ai::GridCell cell)
+        {
+            const sf::Vector2f node = ai::gridCellWaypoint(cell, 32.f, 26.f);
+            const bool overlapsProp = std::abs(node.x - propGround.x) < (28.f + 20.f) / 2.f &&
+                node.y - 18.f < propGround.y && node.y > propGround.y - 8.f;
+            return cell.column >= 0 && cell.column < 4 && cell.row >= 0 && cell.row < 4 &&
+                !overlapsProp;
+        };
+        expect(!propBlockedWalkable({ 1, 0 }),
+               "Navigation rejects a prop cell using the Skeleton's 28x18 foot box");
+
+        std::array<std::array<int, 4>, 4> dividedGrid{};
+        for (int row = 0; row < 4; ++row)
+            dividedGrid[row][1] = 1;
+        const auto dividedWalkable = [&dividedGrid](ai::GridCell cell)
+        {
+            return cell.column >= 0 && cell.column < 4 && cell.row >= 0 && cell.row < 4 &&
+                dividedGrid[cell.row][cell.column] == 0;
+        };
+        ai::EnemyContext noPathContext{};
+        noPathContext.currentAction = ai::EnemyContext::Action::Chase;
+        noPathContext.enemyPosition = ai::gridCellCenter({ 0, 1 }, 32.f);
+        noPathContext.playerPosition = ai::gridCellCenter({ 3, 1 }, 32.f);
+        ai::SkeletonPathState noPathState;
+        const sf::Vector2f noPathMovement = ai::followSkeletonPath(
+            noPathContext, noPathState, 0.1f, dividedGrid, 32.f,
+            dividedWalkable, [](const sf::Vector2f&) { return true; });
+        expect(noPathState.pathFailed && noPathMovement == sf::Vector2f{ 0.f, 0.f } &&
+               noPathContext.moveDirection == sf::Vector2f{ 0.f, 0.f },
+               "Skeleton holds position safely when A* cannot reach the Player");
+
+        context.currentAction = ai::EnemyContext::Action::Attack;
+        const sf::Vector2f stoppedMovement = ai::followSkeletonPath(
+            context, state, 0.25f, grid, 32.f, walkable, canOccupy);
+        expect(stoppedMovement == sf::Vector2f{ 0.f, 0.f } && state.path.empty(),
+               "Skeleton clears its path and stops when Chase is no longer selected");
+    }
 }
 
 int main()
@@ -242,6 +538,10 @@ int main()
     testLeafNodesAndTree();
     testSkeletonDecision();
     testSkeletonMovement();
+    testAStarPathfinding();
+    testCentralPassageNavigation();
+    testSkeletonCombat();
+    testSkeletonPathFollowing();
 
     std::cout << "\n" << (failures == 0 ? "All tests passed." : "Test failures: ")
               << (failures == 0 ? 0 : failures) << '\n';

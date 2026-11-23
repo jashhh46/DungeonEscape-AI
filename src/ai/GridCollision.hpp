@@ -2,6 +2,8 @@
 
 #include <SFML/System/Vector2.hpp>
 
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
 
 namespace ai
@@ -43,6 +45,30 @@ namespace ai
             }
         }
 
+        return true;
+    }
+
+    // Sample the ground-to-ground line so walls and solid props block attacks.
+    template <typename CanOccupy>
+    bool hasClearLineOfSight(const sf::Vector2f& from,
+                             const sf::Vector2f& to,
+                             CanOccupy canOccupy,
+                             float sampleSpacing = 16.f)
+    {
+        const sf::Vector2f difference = to - from;
+        const float distance = std::sqrt(difference.x * difference.x +
+                                         difference.y * difference.y);
+        if (distance <= 0.001f)
+            return true;
+
+        const int samples = static_cast<int>(std::ceil(distance /
+            std::max(sampleSpacing, 1.f)));
+        for (int i = 1; i < samples; ++i)
+        {
+            const float amount = static_cast<float>(i) / samples;
+            if (!canOccupy(from + difference * amount))
+                return false;
+        }
         return true;
     }
 }

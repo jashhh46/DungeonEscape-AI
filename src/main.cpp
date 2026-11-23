@@ -1,9 +1,11 @@
 #include <SFML/Graphics.hpp>
 
 #include "ai/BehaviourTree.hpp"
+#include "ai/SkeletonCombat.hpp"
 #include "ai/EnemyContext.hpp"
 #include "ai/GridCollision.hpp"
 #include "ai/SkeletonDecision.hpp"
+#include "ai/SkeletonPathfinding.hpp"
 
 #include <algorithm>
 #include <array>
@@ -181,6 +183,7 @@ int main()
 	constexpr float playerColliderTopOffset = 90.f;
 	constexpr float skeletonColliderWidth = 28.f;
 	constexpr float skeletonColliderHeight = 18.f;
+	constexpr float skeletonNavigationGroundOffset = 104.f;
 	// Keep the Player's visible art inside the world without using padded art as the collider.
 	constexpr float visibleLeftExtent = 88.f;
 	constexpr float visibleRightExtent = 86.f;
@@ -281,6 +284,14 @@ int main()
 		return 1;
 	}
 	skeletonWalkTexture.setSmooth(false);
+
+	sf::Texture skeletonAttackTexture;
+	if (!skeletonAttackTexture.loadFromFile("Assets/characters/skeleton/skeleton_attack_sheet.png"))
+	{
+		std::cerr << "Could not load the Skeleton Guard attack spritesheet.\n";
+		return 1;
+	}
+	skeletonAttackTexture.setSmooth(false);
 
 	sf::Texture floorTexture;
 	if (!floorTexture.loadFromFile("Assets/tileset/floor_plain.png"))
@@ -501,11 +512,19 @@ int main()
 
 	// The first enemy is the Skeleton Guard; its context and tree belong to this instance.
 	ai::EnemyContext skeletonContext;
-	skeletonContext.detectionRange = 250.f;
+	skeletonContext.detectionRange = 375.f;
 	skeletonContext.attackRange = 60.f;
+	skeletonContext.attackRangeBuffer = 10.f;
 	skeletonContext.moveSpeed = 100.f;
 	ai::BehaviourTree skeletonTree;
 	ai::buildSkeletonBehaviourTree(skeletonTree);
+	ai::SkeletonAttackState skeletonAttack;
+	ai::PlayerHealth playerHealth;
+
+	sf::Font uiFont;
+	const bool uiFontLoaded = uiFont.openFromFile("C:/Windows/Fonts/arial.ttf");
+	sf::Text healthLabel(uiFont, "Player HP: 100 / 100", 22);
+	healthLabel.setFillColor(sf::Color::White);
 
 	sf::Sprite floorTile(floorTexture);
 
@@ -533,12 +552,46 @@ int main()
 			return false;
 		return propCollisionFree(groundPosition, playerColliderWidth, playerColliderHeight);
 	};
+	const auto skeletonCanOccupy = [&](const sf::Vector2f& groundPosition)
+	{
+		return ai::isFootprintClear(groundPosition,
+			skeletonColliderWidth, skeletonColliderHeight, dungeon,
+			static_cast<float>(tileSize), [](TileType tile) { return isWalkable(tile); }) &&
+			propCollisionFree(groundPosition, skeletonColliderWidth, skeletonColliderHeight);
+	};
+	const auto skeletonCellWalkable = [&](ai::GridCell cell)
+	{
+		const sf::Vector2f ground = ai::gridCellWaypoint(
+			cell, static_cast<float>(tileSize), skeletonNavigationGroundOffset);
+		return skeletonCanOccupy(ground);
+	};
+
+	sf::RectangleShape hudPanel({ 310.f, 92.f });
+	hudPanel.setPosition({ 16.f, 16.f });
+	hudPanel.setFillColor(sf::Color(15, 15, 24, 220));
+	hudPanel.setOutlineColor(sf::Color(190, 170, 125));
+	hudPanel.setOutlineThickness(2.f);
+	healthLabel.setPosition({ 26.f, 20.f });
+	sf::RectangleShape healthBarBackground({ 280.f, 24.f });
+	healthBarBackground.setPosition({ 26.f, 58.f });
+	healthBarBackground.setFillColor(sf::Color(65, 30, 35));
+	sf::RectangleShape healthBar({ 280.f, 24.f });
+	healthBar.setPosition({ 26.f, 58.f });
+	healthBar.setFillColor(sf::Color(80, 190, 95));
+	sf::Text defeatTitle(uiFont, "DEFEAT", 64);
+	defeatTitle.setFillColor(sf::Color(235, 80, 70));
+	defeatTitle.setPosition({ 400.f, 330.f });
+	sf::Text defeatSubtitle(uiFont, "Player has fallen", 28);
+	defeatSubtitle.setFillColor(sf::Color::White);
+	defeatSubtitle.setPosition({ 405.f, 410.f });
+	bool defeatReported = false;
 
 	sf::Clock deltaClock;
 	float animationTime = 0.f;
 	int facingRow = 0;
 	float skeletonAnimationTime = 0.f;
 	int skeletonFacingRow = 0;
+	ai::SkeletonPathState skeletonPathState;
 
 	while (window.isOpen())
 	{
@@ -552,13 +605,13 @@ int main()
 
 		const float deltaTime = std::min(deltaClock.restart().asSeconds(), 0.1f);
 		sf::Vector2f direction{};
-		if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::W))
+		if (playerHealth.current > 0 && sf::Keyboard::isKeyPressed(sf::Keyboard::Key::W))
 			direction.y -= 1.f;
-		if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::S))
+		if (playerHealth.current > 0 && sf::Keyboard::isKeyPressed(sf::Keyboard::Key::S))
 			direction.y += 1.f;
-		if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::A))
+		if (playerHealth.current > 0 && sf::Keyboard::isKeyPressed(sf::Keyboard::Key::A))
 			direction.x -= 1.f;
-		if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::D))
+		if (playerHealth.current > 0 && sf::Keyboard::isKeyPressed(sf::Keyboard::Key::D))
 			direction.x += 1.f;
 
 		const float directionLength = std::sqrt(direction.x * direction.x + direction.y * direction.y);
@@ -598,9 +651,18 @@ int main()
 		skeletonContext.enemyPosition = enemies[0].sprite.getTransform().transformPoint(
 			{ playerFrameSize / 2.f, skeletonFootYInFrame });
 		skeletonContext.playerPosition = playerGroundPosition;
+		skeletonContext.attackCycleActive = skeletonAttack.animationActive;
 		ai::updateSkeletonVisibility(skeletonContext);
+		skeletonContext.hasLineOfSight = ai::hasClearLineOfSight(
+			skeletonContext.enemyPosition, skeletonContext.playerPosition, skeletonCanOccupy, 12.f);
 		const ai::EnemyContext::Action previousSkeletonAction = skeletonContext.currentAction;
-		skeletonTree.tick(skeletonContext, deltaTime);
+		if (playerHealth.current > 0)
+			skeletonTree.tick(skeletonContext, deltaTime);
+		else
+		{
+			skeletonContext.currentAction = ai::EnemyContext::Action::Idle;
+			skeletonContext.moveDirection = { 0.f, 0.f };
+		}
 		if (skeletonContext.currentAction != previousSkeletonAction)
 		{
 			const char* actionName = "Idle";
@@ -611,16 +673,32 @@ int main()
 			std::cout << "Skeleton Guard: " << actionName << '\n';
 		}
 
-		const auto skeletonCanOccupy = [&](const sf::Vector2f& groundPosition)
-		{
-			return ai::isFootprintClear(groundPosition,
-				skeletonColliderWidth, skeletonColliderHeight, dungeon,
-				static_cast<float>(tileSize), [](TileType tile) { return isWalkable(tile); }) &&
-				propCollisionFree(groundPosition, skeletonColliderWidth, skeletonColliderHeight);
-		};
-		const sf::Vector2f skeletonMovement = ai::moveSkeleton(
-			skeletonContext, deltaTime, skeletonCanOccupy);
+		const bool pathWasUnavailable = skeletonPathState.pathFailed;
+		const sf::Vector2f skeletonMovement = ai::followSkeletonPath(
+			skeletonContext, skeletonPathState, deltaTime, dungeon,
+			static_cast<float>(tileSize), skeletonCellWalkable, skeletonCanOccupy,
+			skeletonNavigationGroundOffset);
+		if (!pathWasUnavailable && skeletonPathState.pathFailed &&
+			skeletonContext.currentAction == ai::EnemyContext::Action::Chase)
+			std::cerr << "Skeleton Guard: no A* path to Player; holding position.\n";
 		const bool skeletonIsWalking = skeletonMovement.x != 0.f || skeletonMovement.y != 0.f;
+		skeletonContext.hasLineOfSight = ai::hasClearLineOfSight(
+			skeletonContext.enemyPosition, skeletonContext.playerPosition, skeletonCanOccupy, 12.f);
+		const float distanceToPlayer = ai::distanceBetween(
+			skeletonContext.enemyPosition, skeletonContext.playerPosition);
+		const ai::SkeletonAttackUpdate attackUpdate = ai::updateSkeletonAttack(
+			skeletonAttack, playerHealth,
+			skeletonContext.currentAction == ai::EnemyContext::Action::Attack,
+			distanceToPlayer, skeletonContext.attackRange,
+			skeletonContext.hasLineOfSight, deltaTime);
+		skeletonContext.attackCycleActive = attackUpdate.animationActive;
+		if (attackUpdate.damageApplied)
+			std::cout << "Player hit by Skeleton Guard: " << playerHealth.current << " HP remaining.\n";
+		if (playerHealth.current == 0 && !defeatReported)
+		{
+			std::cout << "Player defeated.\n";
+			defeatReported = true;
+		}
 
 		// Keep the sprite's feet aligned with its ground position.
 		constexpr float skeletonScale = 0.8f;
@@ -637,13 +715,23 @@ int main()
 			else
 				skeletonFacingRow = skeletonMovement.y > 0.f ? 0 : 1;
 		}
-		skeletonAnimationTime += deltaTime;
-		const float skeletonFps = skeletonIsWalking ? walkFramesPerSecond : idleFramesPerSecond;
-		const int skeletonFrame = static_cast<int>(skeletonAnimationTime * skeletonFps) % animationFrameCount;
-		enemies[0].sprite.setTexture(skeletonIsWalking ? skeletonWalkTexture : enemies[0].texture);
-		enemies[0].sprite.setTextureRect(sf::IntRect(
-			{ skeletonFrame * playerFrameSize, skeletonFacingRow * playerFrameSize },
-			{ playerFrameSize, playerFrameSize }));
+		if (attackUpdate.animationActive)
+		{
+			enemies[0].sprite.setTexture(skeletonAttackTexture);
+			enemies[0].sprite.setTextureRect(sf::IntRect(
+				{ attackUpdate.frame * playerFrameSize, skeletonFacingRow * playerFrameSize },
+				{ playerFrameSize, playerFrameSize }));
+		}
+		else
+		{
+			skeletonAnimationTime += deltaTime;
+			const float skeletonFps = skeletonIsWalking ? walkFramesPerSecond : idleFramesPerSecond;
+			const int skeletonFrame = static_cast<int>(skeletonAnimationTime * skeletonFps) % animationFrameCount;
+			enemies[0].sprite.setTexture(skeletonIsWalking ? skeletonWalkTexture : enemies[0].texture);
+			enemies[0].sprite.setTextureRect(sf::IntRect(
+				{ skeletonFrame * playerFrameSize, skeletonFacingRow * playerFrameSize },
+				{ playerFrameSize, playerFrameSize }));
+		}
 
 		const bool isWalking = newPosition.x != oldPosition.x || newPosition.y != oldPosition.y;
 		animationTime += deltaTime;
@@ -712,6 +800,29 @@ int main()
 			});
 		for (const DepthItem& item : depthItems)
 			window.draw(*item.sprite);
+
+		window.setView(window.getDefaultView());
+		window.draw(hudPanel);
+		window.draw(healthBarBackground);
+		healthBar.setSize({ 280.f * playerHealth.current / ai::PlayerHealth::maximum, 24.f });
+		window.draw(healthBar);
+		if (uiFontLoaded)
+		{
+			healthLabel.setString("Player HP: " + std::to_string(playerHealth.current) + " / 100");
+			window.draw(healthLabel);
+		}
+		if (playerHealth.current == 0)
+		{
+			sf::RectangleShape defeatOverlay({ static_cast<float>(windowWidth),
+				static_cast<float>(windowHeight) });
+			defeatOverlay.setFillColor(sf::Color(0, 0, 0, 185));
+			window.draw(defeatOverlay);
+			if (uiFontLoaded)
+			{
+				window.draw(defeatTitle);
+				window.draw(defeatSubtitle);
+			}
+		}
 		window.display();
 	}
 }
