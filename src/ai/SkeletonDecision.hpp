@@ -51,7 +51,12 @@ namespace ai
             [](EnemyContext& context, float)
             {
                 context.currentAction = EnemyContext::Action::Chase;
-                context.moveDirection = { 0.f, 0.f };
+                const sf::Vector2f difference = context.playerPosition - context.enemyPosition;
+                const float distance = std::sqrt(
+                    difference.x * difference.x + difference.y * difference.y);
+                context.moveDirection = distance > 0.f
+                    ? difference / distance
+                    : sf::Vector2f{ 0.f, 0.f };
                 return NodeStatus::Success;
             }));
         root->addChild(std::move(chaseSequence));
@@ -65,5 +70,32 @@ namespace ai
             }));
 
         tree.setRoot(std::move(root));
+    }
+
+    template <typename CanOccupy>
+    inline sf::Vector2f moveSkeleton(EnemyContext& context,
+                                    float deltaTime,
+                                    CanOccupy canOccupy)
+    {
+        if (context.currentAction != EnemyContext::Action::Chase || deltaTime <= 0.f)
+        {
+            context.moveDirection = { 0.f, 0.f };
+            return { 0.f, 0.f };
+        }
+
+        const sf::Vector2f start = context.enemyPosition;
+        const sf::Vector2f movement = context.moveDirection * context.moveSpeed * deltaTime;
+        sf::Vector2f candidate = start;
+
+        candidate.x += movement.x;
+        if (canOccupy(candidate))
+            context.enemyPosition.x = candidate.x;
+
+        candidate = context.enemyPosition;
+        candidate.y += movement.y;
+        if (canOccupy(candidate))
+            context.enemyPosition.y = candidate.y;
+
+        return context.enemyPosition - start;
     }
 }

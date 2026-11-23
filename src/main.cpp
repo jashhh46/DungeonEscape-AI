@@ -2,6 +2,7 @@
 
 #include "ai/BehaviourTree.hpp"
 #include "ai/EnemyContext.hpp"
+#include "ai/GridCollision.hpp"
 #include "ai/SkeletonDecision.hpp"
 
 #include <algorithm>
@@ -56,6 +57,8 @@ int main()
 	constexpr float playerColliderWidth = 48.f;
 	constexpr float playerColliderHeight = 28.f;
 	constexpr float playerColliderTopOffset = 90.f;
+	constexpr float skeletonColliderWidth = 28.f;
+	constexpr float skeletonColliderHeight = 18.f;
 	// Visible art bounds keep the Boss on screen without using the padded frame as its collider.
 	constexpr float visibleLeftExtent = 88.f;
 	constexpr float visibleRightExtent = 86.f;
@@ -116,6 +119,14 @@ int main()
 		enemies[i].sprite.setPosition(enemySpawns[i].position);
 		enemies[i].sprite.setScale({ enemySpawns[i].scale, enemySpawns[i].scale });
 	}
+
+	sf::Texture skeletonWalkTexture;
+	if (!skeletonWalkTexture.loadFromFile("Assets/characters/skeleton/skeleton_walk_sheet.png"))
+	{
+		std::cerr << "Could not load the Skeleton Guard walk spritesheet.\n";
+		return 1;
+	}
+	skeletonWalkTexture.setSmooth(false);
 
 	sf::Texture floorTexture;
 	if (!floorTexture.loadFromFile("Assets/tileset/floor_plain.png"))
@@ -188,11 +199,6 @@ int main()
 
 	auto canOccupy = [&](sf::Vector2f playerPosition)
 	{
-		const float left = playerPosition.x - playerColliderWidth / 2.f;
-		const float top = playerPosition.y + playerColliderTopOffset;
-		const float right = left + playerColliderWidth;
-		const float bottom = top + playerColliderHeight;
-
 		// Keep the visible Boss art on screen; this is separate from the foot-sized collider.
 		if (playerPosition.x < visibleLeftExtent ||
 			playerPosition.x > windowWidth - visibleRightExtent ||
@@ -200,31 +206,20 @@ int main()
 			playerPosition.y > windowHeight - visibleBottomExtent)
 			return false;
 
-		for (int row = 0; row < tilesDown; ++row)
-		{
-			for (int column = 0; column < tilesAcross; ++column)
-			{
-				if (isWalkable(dungeon[row][column]))
-					continue;
-
-				const float tileLeft = static_cast<float>(column * tileSize);
-				const float tileTop = static_cast<float>(row * tileSize);
-				const float tileRight = tileLeft + tileSize;
-				const float tileBottom = tileTop + tileSize;
-
-				const bool overlaps = left < tileRight && right > tileLeft &&
-					top < tileBottom && bottom > tileTop;
-				if (overlaps)
-					return false;
-			}
-		}
-
-		return true;
+		const sf::Vector2f groundPosition{
+			playerPosition.x,
+			playerPosition.y + playerColliderTopOffset + playerColliderHeight
+		};
+		return ai::isFootprintClear(groundPosition,
+			playerColliderWidth, playerColliderHeight, dungeon,
+			static_cast<float>(tileSize), [](TileType tile) { return isWalkable(tile); });
 	};
 
 	sf::Clock deltaClock;
 	float animationTime = 0.f;
 	int facingRow = 0;
+	float skeletonAnimationTime = 0.f;
+	int skeletonFacingRow = 0;
 
 	while (window.isOpen())
 	{
@@ -296,6 +291,39 @@ int main()
 				actionName = "Chase";
 			std::cout << "Skeleton Guard: " << actionName << '\n';
 		}
+
+		const auto skeletonCanOccupy = [&](const sf::Vector2f& groundPosition)
+		{
+			return ai::isFootprintClear(groundPosition,
+				skeletonColliderWidth, skeletonColliderHeight, dungeon,
+				static_cast<float>(tileSize), [](TileType tile) { return isWalkable(tile); });
+		};
+		const sf::Vector2f skeletonMovement = ai::moveSkeleton(
+			skeletonContext, deltaTime, skeletonCanOccupy);
+		const bool skeletonIsWalking = skeletonMovement.x != 0.f || skeletonMovement.y != 0.f;
+
+		// Keep the sprite's feet aligned with its ground position.
+		constexpr float skeletonScale = 0.8f;
+		constexpr float skeletonFootOffset = (skeletonFootYInFrame - bossFrameSize / 2.f) * skeletonScale;
+		enemies[0].sprite.setPosition({
+			skeletonContext.enemyPosition.x,
+			skeletonContext.enemyPosition.y - skeletonFootOffset
+		});
+
+		if (skeletonIsWalking)
+		{
+			if (std::abs(skeletonMovement.x) > std::abs(skeletonMovement.y))
+				skeletonFacingRow = skeletonMovement.x > 0.f ? 3 : 2;
+			else
+				skeletonFacingRow = skeletonMovement.y > 0.f ? 0 : 1;
+		}
+		skeletonAnimationTime += deltaTime;
+		const float skeletonFps = skeletonIsWalking ? walkFramesPerSecond : idleFramesPerSecond;
+		const int skeletonFrame = static_cast<int>(skeletonAnimationTime * skeletonFps) % animationFrameCount;
+		enemies[0].sprite.setTexture(skeletonIsWalking ? skeletonWalkTexture : enemies[0].texture);
+		enemies[0].sprite.setTextureRect(sf::IntRect(
+			{ skeletonFrame * bossFrameSize, skeletonFacingRow * bossFrameSize },
+			{ bossFrameSize, bossFrameSize }));
 
 		const bool isWalking = newPosition.x != oldPosition.x || newPosition.y != oldPosition.y;
 		animationTime += deltaTime;

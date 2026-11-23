@@ -1,9 +1,11 @@
 #include "ai/BehaviourTree.hpp"
 #include "ai/CompositeNodes.hpp"
 #include "ai/EnemyContext.hpp"
+#include "ai/GridCollision.hpp"
 #include "ai/LeafNodes.hpp"
 #include "ai/SkeletonDecision.hpp"
 
+#include <array>
 #include <cmath>
 #include <functional>
 #include <iostream>
@@ -172,6 +174,65 @@ namespace
                "Skeleton selects Idle outside detection range");
         expect(!context.playerVisible, "Skeleton does not see player outside detection range");
     }
+
+    void testSkeletonMovement()
+    {
+        ai::BehaviourTree tree;
+        ai::buildSkeletonBehaviourTree(tree);
+
+        ai::EnemyContext directionContext{};
+        directionContext.enemyPosition = { 100.f, 100.f };
+        directionContext.playerPosition = { 160.f, 180.f };
+        ai::updateSkeletonVisibility(directionContext);
+        tree.tick(directionContext, 0.016f);
+        expect(directionContext.currentAction == ai::EnemyContext::Action::Chase,
+               "Movement direction test selects Chase");
+        expect(std::abs(directionContext.moveDirection.x - 0.6f) < 0.001f &&
+               std::abs(directionContext.moveDirection.y - 0.8f) < 0.001f,
+               "Chase direction is normalized from enemy ground point to player ground point");
+
+        ai::EnemyContext stopContext{};
+        stopContext.enemyPosition = { 40.f, 40.f };
+        stopContext.playerPosition = { 80.f, 40.f };
+        stopContext.moveDirection = { 1.f, 0.f };
+        ai::updateSkeletonVisibility(stopContext);
+        tree.tick(stopContext, 0.1f);
+        const sf::Vector2f stoppedMovement = ai::moveSkeleton(
+            stopContext, 0.1f, [](const sf::Vector2f&) { return true; });
+        expect(stopContext.currentAction == ai::EnemyContext::Action::Attack,
+               "Attack range selects Attack");
+        expect(stoppedMovement == sf::Vector2f{ 0.f, 0.f } &&
+               stopContext.enemyPosition == sf::Vector2f{ 40.f, 40.f },
+               "Skeleton does not move while Attack is selected");
+        expect(stopContext.moveDirection == sf::Vector2f{ 0.f, 0.f },
+               "Attack clears the Skeleton movement direction");
+
+        // A non-zero tile represents a wall, pillar, or brazier.
+        std::array<std::array<int, 4>, 4> tiles{};
+        tiles[1][2] = 1;
+        const auto canOccupy = [&tiles](const sf::Vector2f& groundPosition)
+        {
+            return ai::isFootprintClear(groundPosition, 16.f, 12.f, tiles, 32.f,
+                [](int tile) { return tile == 0; });
+        };
+
+        ai::EnemyContext collisionContext{};
+        collisionContext.enemyPosition = { 40.f, 52.f };
+        collisionContext.playerPosition = { 120.f, 52.f };
+        collisionContext.attackRange = 20.f;
+        collisionContext.detectionRange = 200.f;
+        collisionContext.moveSpeed = 100.f;
+        ai::updateSkeletonVisibility(collisionContext);
+        tree.tick(collisionContext, 0.1f);
+        ai::moveSkeleton(collisionContext, 0.1f, canOccupy);
+        expect(collisionContext.enemyPosition.x == 50.f,
+               "Skeleton advances across a clear tile toward an obstacle");
+        const sf::Vector2f blockedStep = ai::moveSkeleton(collisionContext, 0.1f, canOccupy);
+        expect(collisionContext.enemyPosition.x == 50.f && blockedStep == sf::Vector2f{ 0.f, 0.f },
+               "Foot collision prevents the Skeleton entering a blocked tile");
+        expect(!canOccupy({ 7.f, 20.f }),
+               "Foot collision rejects positions beyond the dungeon boundary");
+    }
 }
 
 int main()
@@ -180,6 +241,7 @@ int main()
     testSequence();
     testLeafNodesAndTree();
     testSkeletonDecision();
+    testSkeletonMovement();
 
     std::cout << "\n" << (failures == 0 ? "All tests passed." : "Test failures: ")
               << (failures == 0 ? 0 : failures) << '\n';
