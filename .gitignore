@@ -1,6 +1,25 @@
-build
-out
-.cache
-.idea
-.vs
-.vscode
+# Build and generated CMake files
+/build/
+/out/
+/.cache/
+/CMakeFiles/
+/CMakeCache.txt
+/cmake_install.cmake
+/compile_commands.json
+/Testing/
+
+# Compiled programs and debug output
+*.exe
+*.dll
+*.pdb
+*.obj
+*.ilk
+*.lib
+*.log
+*.tmp
+*.temp
+
+# IDE-generated files
+/.idea/
+/.vs/
+/.vscode/
