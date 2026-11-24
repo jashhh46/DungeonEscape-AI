@@ -1026,6 +1026,22 @@ namespace
                "Enemy health starts at the requested values for all three roles");
     }
 
+    void testDefeatedEnemyRenderingAndInteraction()
+    {
+        ai::EnemyHealth enemy{ 15 };
+        expect(ai::shouldRenderEnemy(enemy),
+               "Living enemy is eligible for sprite and health-bar rendering");
+        enemy.takeDamage(15);
+        expect(enemy.isDefeated() && !ai::shouldRenderEnemy(enemy),
+               "Enemy at zero HP is excluded from sprite and health-bar rendering");
+
+        const ai::PlayerAttackUpdate attack{ true, ai::playerAttackImpactFrame, 3, true };
+        expect(!ai::applyPlayerAttackDamage(attack, enemy,
+                   { 100.f, 100.f }, 48.f, 28.f, { 150.f, 100.f },
+                   28.f, 18.f, true) && enemy.current == 0,
+               "Defeated enemy cannot receive more Player attack damage");
+    }
+
     void testSkeletonMovement()
     {
         ai::BehaviourTree tree;
@@ -1348,6 +1364,7 @@ int main()
     testOgreCombat();
     testPlayerAttack();
     testPlayerCombat();
+    testDefeatedEnemyRenderingAndInteraction();
     testSkeletonMovement();
     testAStarPathfinding();
     testCentralPassageNavigation();

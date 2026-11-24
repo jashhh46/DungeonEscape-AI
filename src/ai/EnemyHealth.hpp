@@ -27,4 +27,9 @@ namespace ai
             return true;
         }
     };
+
+    inline bool shouldRenderEnemy(const EnemyHealth& health)
+    {
+        return !health.isDefeated();
+    }
 }

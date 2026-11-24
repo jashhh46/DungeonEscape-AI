@@ -1178,6 +1178,8 @@ int main()
 		depthItems.push_back({ &player, playerGroundPosition.y });
 		for (std::size_t i = 0; i < enemies.size(); ++i)
 		{
+			if (!ai::shouldRenderEnemy(enemyHealth[i]))
+				continue;
 			const float enemyGroundY = enemies[i].sprite.getTransform().transformPoint(
 				{ playerFrameSize / 2.f, skeletonFootYInFrame }).y;
 			depthItems.push_back({ &enemies[i].sprite, enemyGroundY });
@@ -1191,6 +1193,8 @@ int main()
 			window.draw(*item.sprite);
 		for (std::size_t i = 0; i < enemies.size(); ++i)
 		{
+			if (!ai::shouldRenderEnemy(enemyHealth[i]))
+				continue;
 			const float barWidth = 72.f * enemySpawns[i].scale;
 			const float barHeight = 7.f;
 			const sf::Vector2f barAnchor = enemies[i].sprite.getTransform().transformPoint(
