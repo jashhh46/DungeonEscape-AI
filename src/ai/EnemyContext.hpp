@@ -35,7 +35,10 @@ namespace ai
             Chase,
             Attack,
             Retreat,
-            Search
+            Search,
+            Approach,
+            RangedAttack,
+            Reposition
         };
 
         Action currentAction = Action::Idle;

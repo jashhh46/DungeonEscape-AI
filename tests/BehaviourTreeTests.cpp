@@ -1,4 +1,7 @@
 #include "ai/BehaviourTree.hpp"
+#include "ai/ArcherDecision.hpp"
+#include "ai/ArcherCombat.hpp"
+#include "ai/ArcherPathfinding.hpp"
 #include "ai/AStarPathfinder.hpp"
 #include "ai/CompositeNodes.hpp"
 #include "ai/EnemyContext.hpp"
@@ -222,6 +225,367 @@ namespace
         tree.tick(context, 0.016f);
         expect(context.currentAction == ai::EnemyContext::Action::Chase,
                "Skeleton returns to Chase after leaving the Attack buffer");
+    }
+
+    void testArcherDecision()
+    {
+        ai::EnemyContext context{};
+        context.detectionRange = 600.f;
+        context.enemyPosition = { 300.f, 500.f };
+        ai::BehaviourTree tree;
+        ai::buildArcherBehaviourTree(tree);
+
+        const auto selectAtDistance = [&](float distance, bool lineOfSight)
+        {
+            context.playerPosition = { context.enemyPosition.x + distance,
+                context.enemyPosition.y };
+            context.hasLineOfSight = lineOfSight;
+            ai::updateArcherVisibility(context);
+            tree.tick(context, 0.016f);
+            return context.currentAction;
+        };
+
+        expect(selectAtDistance(601.f, true) == ai::EnemyContext::Action::Idle,
+               "Archer selects Idle beyond its 600-unit detection range");
+        expect(selectAtDistance(100.f, false) == ai::EnemyContext::Action::Retreat,
+               "Archer prioritizes Retreat when the Player is closer than 180 units");
+        expect(selectAtDistance(180.f, true) == ai::EnemyContext::Action::RangedAttack,
+               "Archer enters Ranged Attack at the preferred range boundary");
+        expect(selectAtDistance(300.f, true) == ai::EnemyContext::Action::RangedAttack,
+               "Archer selects Ranged Attack inside its preferred distance");
+        expect(selectAtDistance(450.f, true) == ai::EnemyContext::Action::RangedAttack,
+               "Archer remains in Ranged Attack at the far preferred range boundary");
+        expect(selectAtDistance(451.f, true) == ai::EnemyContext::Action::Approach,
+               "Archer selects Approach beyond its preferred attack distance");
+        expect(selectAtDistance(600.f, true) == ai::EnemyContext::Action::Approach,
+               "Archer still selects Approach at the detection limit");
+        expect(selectAtDistance(300.f, false) == ai::EnemyContext::Action::Reposition,
+               "Archer tree selects repositioning when a shot is blocked");
+        expect(context.moveDirection == sf::Vector2f{ 0.f, 0.f },
+               "Archer decision tests do not request movement");
+    }
+
+    void testArcherMovement()
+    {
+        constexpr int size = 8;
+        constexpr float tileSize = 128.f;
+        using TestGrid = std::array<std::array<int, size>, size>;
+        const auto makeGrid = [=]
+        {
+            TestGrid grid{};
+            for (int i = 0; i < size; ++i)
+            {
+                grid[0][i] = grid[size - 1][i] = 1;
+                grid[i][0] = grid[i][size - 1] = 1;
+            }
+            return grid;
+        };
+        auto grid = makeGrid();
+        const auto canOccupy = [&grid, tileSize](const sf::Vector2f& point)
+        {
+            return ai::isFootprintClear(point, ai::archerFootWidth,
+                ai::archerFootHeight, grid, tileSize,
+                [](int tile) { return tile == 0; });
+        };
+        const auto cellWalkable = [&grid, tileSize, size](ai::GridCell cell)
+        {
+            if (cell.column < 0 || cell.column >= size || cell.row < 0 || cell.row >= size)
+                return false;
+            const sf::Vector2f point = ai::gridCellWaypoint(
+                cell, tileSize, ai::archerNavigationGroundOffset);
+            return ai::isFootprintClear(point, ai::archerFootWidth,
+                ai::archerFootHeight, grid, tileSize,
+                [](int tile) { return tile == 0; });
+        };
+        const auto hasLineOfSight = [&canOccupy](const sf::Vector2f& from,
+            const sf::Vector2f& to)
+        {
+            return ai::hasClearLineOfSight(from, to, canOccupy, 12.f);
+        };
+
+        ai::EnemyContext retreat{};
+        retreat.currentAction = ai::EnemyContext::Action::Retreat;
+        retreat.enemyPosition = ai::gridCellWaypoint({ 4, 3 }, tileSize,
+            ai::archerNavigationGroundOffset);
+        retreat.playerPosition = ai::gridCellWaypoint({ 3, 3 }, tileSize,
+            ai::archerNavigationGroundOffset);
+        retreat.moveSpeed = 120.f;
+        ai::ArcherPathState retreatState;
+        const sf::Vector2f retreatStart = retreat.enemyPosition;
+        const sf::Vector2f retreatMove = ai::moveArcher(retreat, retreatState,
+            0.25f, grid, tileSize, cellWalkable, canOccupy, hasLineOfSight);
+        expect(retreatMove.x > 0.f && retreat.enemyPosition.x > retreatStart.x,
+               "Archer retreats away from the Player toward a reachable position");
+
+        auto obstacleGrid = makeGrid();
+        obstacleGrid[3][3] = 1;
+        const auto obstacleCanOccupy = [&obstacleGrid, tileSize](const sf::Vector2f& point)
+        {
+            return ai::isFootprintClear(point, ai::archerFootWidth,
+                ai::archerFootHeight, obstacleGrid, tileSize,
+                [](int tile) { return tile == 0; });
+        };
+        const auto obstacleWalkable = [&obstacleGrid, tileSize, size](ai::GridCell cell)
+        {
+            if (cell.column < 0 || cell.column >= size || cell.row < 0 || cell.row >= size)
+                return false;
+            return ai::isFootprintClear(ai::gridCellWaypoint(cell, tileSize,
+                ai::archerNavigationGroundOffset), ai::archerFootWidth,
+                ai::archerFootHeight, obstacleGrid, tileSize,
+                [](int tile) { return tile == 0; });
+        };
+        ai::EnemyContext aroundObstacle{};
+        aroundObstacle.currentAction = ai::EnemyContext::Action::Approach;
+        aroundObstacle.enemyPosition = ai::gridCellWaypoint({ 2, 3 }, tileSize,
+            ai::archerNavigationGroundOffset);
+        aroundObstacle.playerPosition = ai::gridCellWaypoint({ 5, 3 }, tileSize,
+            ai::archerNavigationGroundOffset);
+        aroundObstacle.moveSpeed = 120.f;
+        ai::ArcherPathState obstacleState;
+        const sf::Vector2f obstacleMove = ai::moveArcher(aroundObstacle,
+            obstacleState, 0.25f, obstacleGrid, tileSize,
+            obstacleWalkable, obstacleCanOccupy,
+            [&obstacleCanOccupy](const sf::Vector2f& from, const sf::Vector2f& to)
+            {
+                return ai::hasClearLineOfSight(from, to, obstacleCanOccupy, 12.f);
+            });
+        expect(!obstacleState.pathFailed && ai::isPathValid(obstacleState.path, obstacleWalkable),
+               "Archer plans an A* route around a blocking obstacle");
+        expect(obstacleMove != sf::Vector2f{ 0.f, 0.f } &&
+               obstacleCanOccupy(aroundObstacle.enemyPosition),
+               "Archer moves without entering the obstacle footprint");
+
+        ai::EnemyContext approach{};
+        approach.currentAction = ai::EnemyContext::Action::Approach;
+        approach.enemyPosition = ai::gridCellWaypoint({ 1, 3 }, tileSize,
+            ai::archerNavigationGroundOffset);
+        approach.playerPosition = ai::gridCellWaypoint({ 5, 3 }, tileSize,
+            ai::archerNavigationGroundOffset);
+        approach.moveSpeed = 120.f;
+        ai::ArcherPathState approachState;
+        for (int i = 0; i < 30; ++i)
+            ai::moveArcher(approach, approachState, 0.1f, grid, tileSize,
+                cellWalkable, canOccupy, hasLineOfSight);
+        const float approachDistance = ai::archerDistance(approach);
+        expect(approachDistance >= ai::archerDesiredDistance - 1.f &&
+               approachDistance <= ai::archerDesiredDistance + 12.f,
+               "Archer approach stops at its preferred shooting distance (" +
+                   std::to_string(approachDistance) + " units)");
+
+        auto dividerGrid = makeGrid();
+        for (int row = 1; row < size - 1; ++row)
+            if (row != 6)
+                dividerGrid[row][4] = 1;
+        const auto dividerCanOccupy = [&dividerGrid, tileSize](const sf::Vector2f& point)
+        {
+            return ai::isFootprintClear(point, ai::archerFootWidth,
+                ai::archerFootHeight, dividerGrid, tileSize,
+                [](int tile) { return tile == 0; });
+        };
+        const auto dividerWalkable = [&dividerGrid, tileSize, size](ai::GridCell cell)
+        {
+            if (cell.column < 0 || cell.column >= size || cell.row < 0 || cell.row >= size)
+                return false;
+            return ai::isFootprintClear(ai::gridCellWaypoint(cell, tileSize,
+                ai::archerNavigationGroundOffset), ai::archerFootWidth,
+                ai::archerFootHeight, dividerGrid, tileSize,
+                [](int tile) { return tile == 0; });
+        };
+        ai::EnemyContext reposition{};
+        reposition.currentAction = ai::EnemyContext::Action::Reposition;
+        reposition.enemyPosition = ai::gridCellWaypoint({ 2, 3 }, tileSize,
+            ai::archerNavigationGroundOffset);
+        reposition.playerPosition = ai::gridCellWaypoint({ 6, 3 }, tileSize,
+            ai::archerNavigationGroundOffset);
+        reposition.moveSpeed = 120.f;
+        ai::ArcherPathState repositionState;
+        const auto dividerLos = [&dividerCanOccupy](const sf::Vector2f& from,
+            const sf::Vector2f& to)
+        {
+            return ai::hasClearLineOfSight(from, to, dividerCanOccupy, 12.f);
+        };
+        ai::moveArcher(reposition, repositionState, 0.1f, dividerGrid,
+            tileSize, dividerWalkable, dividerCanOccupy, dividerLos);
+        const sf::Vector2f firingPoint = ai::gridCellWaypoint(
+            repositionState.destination, tileSize, ai::archerNavigationGroundOffset);
+        expect(!repositionState.pathFailed && repositionState.destination.column > 4 &&
+               dividerLos(firingPoint, reposition.playerPosition),
+               "Blocked line of sight repositions the Archer to a reachable clear shot");
+
+        ai::EnemyContext boundary{};
+        boundary.currentAction = ai::EnemyContext::Action::Retreat;
+        boundary.enemyPosition = ai::gridCellWaypoint({ 1, 1 }, tileSize,
+            ai::archerNavigationGroundOffset);
+        boundary.playerPosition = ai::gridCellWaypoint({ 2, 1 }, tileSize,
+            ai::archerNavigationGroundOffset);
+        boundary.moveSpeed = 120.f;
+        ai::ArcherPathState boundaryState;
+        for (int i = 0; i < 100; ++i)
+            ai::moveArcher(boundary, boundaryState, 0.1f, grid, tileSize,
+                cellWalkable, canOccupy, hasLineOfSight);
+        expect(canOccupy(boundary.enemyPosition),
+               "Archer foot collision keeps movement inside the dungeon boundary");
+    }
+
+    void testArcherCombat()
+    {
+        ai::ArcherAttackState attack;
+        ai::ArcherAttackUpdate start = ai::updateArcherAttack(attack, true, 0.125f);
+        const ai::ArcherAttackUpdate release = ai::updateArcherAttack(attack, true, 0.125f);
+        const ai::ArcherAttackUpdate afterRelease = ai::updateArcherAttack(attack, true, 0.125f);
+        expect(start.animationActive && release.releaseProjectile &&
+               release.frame == ai::archerArrowReleaseFrame &&
+               !afterRelease.releaseProjectile,
+               "Archer releases exactly one arrow at the attack sheet release frame");
+
+        ai::ArcherAttackState cooldown;
+        ai::updateArcherAttack(cooldown, true, 0.05f);
+        ai::updateArcherAttack(cooldown, true, 0.45f);
+        const ai::ArcherAttackUpdate waiting = ai::updateArcherAttack(cooldown, true, 1.0f);
+        const ai::ArcherAttackUpdate ready = ai::updateArcherAttack(cooldown, true, 0.05f);
+        expect(!waiting.animationActive && ready.animationActive,
+               "Archer waits for the 1.5-second attack cooldown before firing again");
+
+        ai::ArcherProjectile arrow = ai::makeArcherProjectile({ 10.f, 20.f }, { 210.f, 20.f });
+        std::vector<ai::ArcherProjectile> traveling{ arrow };
+        ai::PlayerHealth distantPlayer;
+        ai::updateArcherProjectiles(traveling, 0.25f, { 1000.f, 1000.f },
+            48.f, 28.f, distantPlayer, [](const sf::Vector2f&) { return true; });
+        expect(std::abs(traveling[0].position.x - 110.f) < 0.01f &&
+               std::abs(traveling[0].velocity.x - ai::archerArrowSpeed) < 0.01f,
+               "Arrow travels at 400 units per second along its firing-time direction");
+
+        ai::PlayerHealth hitPlayer;
+        std::vector<ai::ArcherProjectile> hitting{
+            ai::makeArcherProjectile({ 0.f, 50.f }, { 100.f, 50.f }) };
+        const int firstHit = ai::updateArcherProjectiles(hitting, 0.2f,
+            { 50.f, 60.f }, 40.f, 20.f, hitPlayer,
+            [](const sf::Vector2f&) { return true; });
+        const int secondHit = ai::updateArcherProjectiles(hitting, 0.2f,
+            { 50.f, 60.f }, 40.f, 20.f, hitPlayer,
+            [](const sf::Vector2f&) { return true; });
+        expect(firstHit == 1 && secondHit == 0 && hitPlayer.current == 92,
+               "One arrow damages the Player once for 8 HP, then is removed");
+
+        ai::PlayerHealth wallPlayer;
+        std::vector<ai::ArcherProjectile> blocked{
+            ai::makeArcherProjectile({ 0.f, 50.f }, { 100.f, 50.f }) };
+        ai::updateArcherProjectiles(blocked, 0.2f, { 80.f, 60.f },
+            40.f, 20.f, wallPlayer,
+            [](const sf::Vector2f& point) { return point.x < 40.f; });
+        expect(!blocked[0].active && wallPlayer.current == 100,
+               "Arrow is removed by a blocking wall or solid obstacle without damage");
+
+        std::vector<ai::ArcherProjectile> leaving{
+            ai::makeArcherProjectile({ 40.f, 20.f }, { 100.f, 20.f }) };
+        ai::updateArcherProjectiles(leaving, 0.1f, { 300.f, 300.f },
+            40.f, 20.f, wallPlayer,
+            [](const sf::Vector2f& point) { return point.x < 50.f; });
+        expect(!leaving[0].active,
+               "Arrow is removed when it reaches the dungeon boundary");
+
+        ai::PlayerHealth lifetimePlayer;
+        std::vector<ai::ArcherProjectile> expiring{
+            ai::makeArcherProjectile({ 0.f, 0.f }, { 100.f, 0.f }) };
+        expiring[0].lifetimeRemaining = 0.05f;
+        ai::updateArcherProjectiles(expiring, 0.1f, { 500.f, 500.f },
+            40.f, 20.f, lifetimePlayer,
+            [](const sf::Vector2f&) { return true; });
+        expect(!expiring[0].active,
+               "Arrow expires after its maximum lifetime");
+    }
+
+    void testArcherRepositionIntegration()
+    {
+        constexpr int size = 8;
+        constexpr float tileSize = 128.f;
+        using TestGrid = std::array<std::array<int, size>, size>;
+        TestGrid grid{};
+        for (int i = 0; i < size; ++i)
+        {
+            grid[0][i] = grid[size - 1][i] = 1;
+            grid[i][0] = grid[i][size - 1] = 1;
+        }
+        // A single wall blocks the direct shot but leaves a route around it.
+        grid[5][4] = 1;
+
+        const auto canOccupy = [&grid, tileSize](const sf::Vector2f& point)
+        {
+            return ai::isFootprintClear(point, ai::archerFootWidth,
+                ai::archerFootHeight, grid, tileSize,
+                [](int tile) { return tile == 0; });
+        };
+        const auto cellWalkable = [&grid, tileSize, size](ai::GridCell cell)
+        {
+            if (cell.column < 0 || cell.column >= size || cell.row < 0 || cell.row >= size)
+                return false;
+            return ai::isFootprintClear(ai::gridCellWaypoint(cell, tileSize,
+                ai::archerNavigationGroundOffset), ai::archerFootWidth,
+                ai::archerFootHeight, grid, tileSize,
+                [](int tile) { return tile == 0; });
+        };
+        const auto hasLineOfSight = [&canOccupy](const sf::Vector2f& from,
+            const sf::Vector2f& to)
+        {
+            return ai::hasClearLineOfSight(from, to, canOccupy, 12.f);
+        };
+
+        ai::EnemyContext context{};
+        context.detectionRange = 600.f;
+        context.enemyPosition = ai::gridCellWaypoint({ 3, 5 }, tileSize,
+            ai::archerNavigationGroundOffset);
+        context.playerPosition = ai::gridCellWaypoint({ 5, 5 }, tileSize,
+            ai::archerNavigationGroundOffset);
+        context.moveSpeed = 120.f;
+        context.hasLineOfSight = hasLineOfSight(context.enemyPosition, context.playerPosition);
+        ai::updateArcherVisibility(context);
+        ai::BehaviourTree tree;
+        ai::buildArcherBehaviourTree(tree);
+        tree.tick(context, 0.05f);
+        expect(context.playerVisible && !context.hasLineOfSight &&
+               ai::archerDistance(context) >= ai::archerRetreatRange &&
+               ai::archerDistance(context) <= ai::archerPreferredAttackRange &&
+               context.currentAction == ai::EnemyContext::Action::Reposition,
+               "Detected Player in shooting range behind a wall selects Reposition");
+
+        ai::ArcherPathState state;
+        ai::moveArcher(context, state, 0.05f, grid, tileSize,
+            cellWalkable, canOccupy, hasLineOfSight);
+        const ai::GridCell firstGoal = state.destination;
+        const bool foundShot = !state.pathFailed &&
+            ai::isPathValid(state.path, cellWalkable) &&
+            hasLineOfSight(ai::gridCellWaypoint(firstGoal, tileSize,
+                ai::archerNavigationGroundOffset), context.playerPosition);
+        expect(foundShot,
+               "A* finds a reachable reposition waypoint with a clear shot");
+
+        bool movedWhileBlocked = context.moveDirection != sf::Vector2f{ 0.f, 0.f };
+        bool stableGoal = true;
+        bool recoveredToShot = false;
+        for (int frame = 0; frame < 100; ++frame)
+        {
+            context.hasLineOfSight = hasLineOfSight(context.enemyPosition,
+                context.playerPosition);
+            ai::updateArcherVisibility(context);
+            tree.tick(context, 0.05f);
+            if (context.currentAction == ai::EnemyContext::Action::RangedAttack)
+            {
+                recoveredToShot = context.hasLineOfSight;
+                break;
+            }
+            if (context.currentAction != ai::EnemyContext::Action::Reposition)
+                break;
+
+            ai::moveArcher(context, state, 0.05f, grid, tileSize,
+                cellWalkable, canOccupy, hasLineOfSight);
+            movedWhileBlocked = movedWhileBlocked ||
+                context.moveDirection != sf::Vector2f{ 0.f, 0.f };
+            stableGoal = stableGoal && state.destination == firstGoal && !state.pathFailed;
+        }
+        expect(movedWhileBlocked && stableGoal,
+               "Archer follows one valid reposition path without replanning or getting stuck");
+        expect(recoveredToShot,
+               "Archer returns to Ranged Attack when movement restores line of sight");
     }
 
     void testSkeletonMovement()
@@ -537,6 +901,10 @@ int main()
     testSequence();
     testLeafNodesAndTree();
     testSkeletonDecision();
+    testArcherDecision();
+    testArcherMovement();
+    testArcherRepositionIntegration();
+    testArcherCombat();
     testSkeletonMovement();
     testAStarPathfinding();
     testCentralPassageNavigation();

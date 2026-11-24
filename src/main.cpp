@@ -1,6 +1,9 @@
 #include <SFML/Graphics.hpp>
 
 #include "ai/BehaviourTree.hpp"
+#include "ai/ArcherDecision.hpp"
+#include "ai/ArcherCombat.hpp"
+#include "ai/ArcherPathfinding.hpp"
 #include "ai/SkeletonCombat.hpp"
 #include "ai/EnemyContext.hpp"
 #include "ai/GridCollision.hpp"
@@ -293,6 +296,22 @@ int main()
 	}
 	skeletonAttackTexture.setSmooth(false);
 
+	sf::Texture archerWalkTexture;
+	if (!archerWalkTexture.loadFromFile("Assets/characters/archer/archer_walk_sheet.png"))
+	{
+		std::cerr << "Could not load the Goblin Archer walk spritesheet.\n";
+		return 1;
+	}
+	archerWalkTexture.setSmooth(false);
+
+	sf::Texture archerAttackTexture;
+	if (!archerAttackTexture.loadFromFile("Assets/characters/archer/archer_attack_sheet.png"))
+	{
+		std::cerr << "Could not load the Goblin Archer attack spritesheet.\n";
+		return 1;
+	}
+	archerAttackTexture.setSmooth(false);
+
 	sf::Texture floorTexture;
 	if (!floorTexture.loadFromFile("Assets/tileset/floor_plain.png"))
 	{
@@ -521,6 +540,19 @@ int main()
 	ai::SkeletonAttackState skeletonAttack;
 	ai::PlayerHealth playerHealth;
 
+	// Archer AI is separate from the Skeleton's decision tree and state.
+	ai::EnemyContext archerContext;
+	archerContext.detectionRange = 600.f;
+	archerContext.moveSpeed = 120.f;
+	ai::BehaviourTree archerTree;
+	ai::buildArcherBehaviourTree(archerTree);
+	ai::ArcherPathState archerPathState;
+	ai::ArcherAttackState archerAttackState;
+	std::vector<ai::ArcherProjectile> archerProjectiles;
+	sf::RectangleShape arrowVisual({ 24.f, 4.f });
+	arrowVisual.setOrigin({ 12.f, 2.f });
+	arrowVisual.setFillColor(sf::Color(210, 180, 115));
+
 	sf::Font uiFont;
 	const bool uiFontLoaded = uiFont.openFromFile("C:/Windows/Fonts/arial.ttf");
 	sf::Text healthLabel(uiFont, "Player HP: 100 / 100", 22);
@@ -565,6 +597,34 @@ int main()
 			cell, static_cast<float>(tileSize), skeletonNavigationGroundOffset);
 		return skeletonCanOccupy(ground);
 	};
+	const auto archerCanOccupy = [&](const sf::Vector2f& groundPosition)
+	{
+		return ai::isFootprintClear(groundPosition, ai::archerFootWidth,
+			ai::archerFootHeight, dungeon, static_cast<float>(tileSize),
+			[](TileType tile) { return isWalkable(tile); }) &&
+			propCollisionFree(groundPosition, ai::archerFootWidth, ai::archerFootHeight);
+	};
+	const auto archerCellWalkable = [&](ai::GridCell cell)
+	{
+		const sf::Vector2f ground = ai::gridCellWaypoint(cell,
+			static_cast<float>(tileSize), ai::archerNavigationGroundOffset);
+		return archerCanOccupy(ground);
+	};
+	const auto archerRayCanOccupy = [&](const sf::Vector2f& groundPosition)
+	{
+		return ai::isFootprintClear(groundPosition, 1.f, 1.f, dungeon,
+			static_cast<float>(tileSize), [](TileType tile) { return isWalkable(tile); }) &&
+			propCollisionFree(groundPosition, 1.f, 1.f);
+	};
+	const auto arrowCanOccupy = [&](const sf::Vector2f& center)
+	{
+		constexpr float arrowWidth = 12.f;
+		constexpr float arrowHeight = 6.f;
+		const sf::Vector2f ground{ center.x, center.y + arrowHeight / 2.f };
+		return ai::isFootprintClear(ground, arrowWidth, arrowHeight, dungeon,
+			static_cast<float>(tileSize), [](TileType tile) { return isWalkable(tile); }) &&
+			propCollisionFree(ground, arrowWidth, arrowHeight);
+	};
 
 	sf::RectangleShape hudPanel({ 310.f, 92.f });
 	hudPanel.setPosition({ 16.f, 16.f });
@@ -592,6 +652,8 @@ int main()
 	float skeletonAnimationTime = 0.f;
 	int skeletonFacingRow = 0;
 	ai::SkeletonPathState skeletonPathState;
+	float archerAnimationTime = 0.f;
+	int archerFacingRow = 0;
 
 	while (window.isOpen())
 	{
@@ -700,6 +762,118 @@ int main()
 			defeatReported = true;
 		}
 
+		// Use each sprite's ground point and the Player's ground point in world space.
+		constexpr float archerFootYInFrame = 244.f;
+		archerContext.enemyPosition = enemies[1].sprite.getTransform().transformPoint(
+			{ playerFrameSize / 2.f, archerFootYInFrame });
+		archerContext.playerPosition = playerGroundPosition;
+		archerContext.hasLineOfSight = ai::hasClearLineOfSight(
+			archerContext.enemyPosition, archerContext.playerPosition, archerRayCanOccupy, 12.f);
+		ai::updateArcherVisibility(archerContext);
+		const ai::EnemyContext::Action previousArcherAction = archerContext.currentAction;
+		archerTree.tick(archerContext, deltaTime);
+		if (archerContext.currentAction != previousArcherAction)
+		{
+			const char* actionName = "Idle";
+			switch (archerContext.currentAction)
+			{
+			case ai::EnemyContext::Action::Retreat:      actionName = "Retreat"; break;
+			case ai::EnemyContext::Action::RangedAttack: actionName = "Ranged Attack"; break;
+			case ai::EnemyContext::Action::Approach:     actionName = "Approach"; break;
+			case ai::EnemyContext::Action::Reposition:   actionName = "Reposition"; break;
+			default: break;
+			}
+			std::cout << "Goblin Archer: " << actionName << '\n';
+		}
+		const bool archerPathWasUnavailable = archerPathState.pathFailed;
+		const sf::Vector2f archerMovement = ai::moveArcher(
+			archerContext, archerPathState, deltaTime, dungeon,
+			static_cast<float>(tileSize), archerCellWalkable, archerCanOccupy,
+			[&](const sf::Vector2f& from, const sf::Vector2f& to)
+			{
+				return ai::hasClearLineOfSight(from, to, archerRayCanOccupy, 12.f);
+			});
+		if (!archerPathWasUnavailable && archerPathState.pathFailed &&
+			(archerContext.currentAction == ai::EnemyContext::Action::Retreat ||
+			 archerContext.currentAction == ai::EnemyContext::Action::Approach ||
+			 archerContext.currentAction == ai::EnemyContext::Action::Reposition))
+			std::cerr << "Goblin Archer: no valid route or firing position; holding position.\n";
+		const bool archerIsWalking = archerMovement.x != 0.f || archerMovement.y != 0.f;
+		if (archerIsWalking)
+		{
+			if (std::abs(archerMovement.x) > std::abs(archerMovement.y))
+				archerFacingRow = archerMovement.x > 0.f ? 3 : 2;
+			else
+				archerFacingRow = archerMovement.y > 0.f ? 0 : 1;
+		}
+		constexpr float archerScale = 0.8f;
+		constexpr float archerFootOffset =
+			(244.f - playerFrameSize / 2.f) * archerScale;
+		enemies[1].sprite.setPosition({ archerContext.enemyPosition.x,
+			archerContext.enemyPosition.y - archerFootOffset });
+
+		if (archerContext.currentAction == ai::EnemyContext::Action::RangedAttack)
+		{
+			const sf::Vector2f toPlayer = archerContext.playerPosition - archerContext.enemyPosition;
+			if (std::abs(toPlayer.x) > std::abs(toPlayer.y))
+				archerFacingRow = toPlayer.x > 0.f ? 3 : 2;
+			else
+				archerFacingRow = toPlayer.y > 0.f ? 0 : 1;
+		}
+
+		const int archerHits = ai::updateArcherProjectiles(archerProjectiles,
+			deltaTime, playerGroundPosition, playerColliderWidth, playerColliderHeight,
+			playerHealth, arrowCanOccupy);
+		if (archerHits > 0)
+			std::cout << "Player hit by Goblin Archer: " << playerHealth.current
+				<< " HP remaining.\n";
+		archerProjectiles.erase(std::remove_if(archerProjectiles.begin(), archerProjectiles.end(),
+			[](const ai::ArcherProjectile& projectile) { return !projectile.active; }),
+			archerProjectiles.end());
+
+		const ai::ArcherAttackUpdate archerAttackUpdate = ai::updateArcherAttack(
+			archerAttackState,
+			archerContext.currentAction == ai::EnemyContext::Action::RangedAttack,
+			deltaTime);
+		if (archerAttackUpdate.releaseProjectile)
+		{
+			const sf::Vector2f toPlayer = archerContext.playerPosition - archerContext.enemyPosition;
+			const float distance = std::sqrt(toPlayer.x * toPlayer.x + toPlayer.y * toPlayer.y);
+			if (distance > 0.001f)
+			{
+				const sf::Vector2f aim = toPlayer / distance;
+				const sf::Vector2f bowOrigin = archerContext.enemyPosition +
+					sf::Vector2f{ 0.f, -48.f } + aim * 28.f;
+				archerProjectiles.push_back(ai::makeArcherProjectile(
+					bowOrigin, archerContext.playerPosition));
+			}
+		}
+		if (playerHealth.current == 0 && !defeatReported)
+		{
+			std::cout << "Player defeated.\n";
+			defeatReported = true;
+		}
+
+		archerAnimationTime += deltaTime;
+		const float archerFps = archerIsWalking && !archerAttackUpdate.animationActive
+			? walkFramesPerSecond : idleFramesPerSecond;
+		const int archerFrame = static_cast<int>(archerAnimationTime * archerFps) %
+			animationFrameCount;
+		if (archerAttackUpdate.animationActive)
+		{
+			enemies[1].sprite.setTexture(archerAttackTexture);
+			enemies[1].sprite.setTextureRect(sf::IntRect(
+				{ archerAttackUpdate.frame * playerFrameSize, archerFacingRow * playerFrameSize },
+				{ playerFrameSize, playerFrameSize }));
+		}
+		else
+		{
+			enemies[1].sprite.setTexture(archerIsWalking ? archerWalkTexture : enemies[1].texture);
+			enemies[1].sprite.setTextureRect(sf::IntRect(
+				{ archerFrame * playerFrameSize, archerFacingRow * playerFrameSize },
+				{ playerFrameSize, playerFrameSize }));
+		}
+
 		// Keep the sprite's feet aligned with its ground position.
 		constexpr float skeletonScale = 0.8f;
 		constexpr float skeletonFootOffset = (skeletonFootYInFrame - playerFrameSize / 2.f) * skeletonScale;
@@ -800,6 +974,14 @@ int main()
 			});
 		for (const DepthItem& item : depthItems)
 			window.draw(*item.sprite);
+		for (const ai::ArcherProjectile& projectile : archerProjectiles)
+		{
+			const float angle = std::atan2(projectile.velocity.y, projectile.velocity.x) *
+				180.f / 3.1415926535f;
+			arrowVisual.setPosition(projectile.position);
+			arrowVisual.setRotation(sf::degrees(angle));
+			window.draw(arrowVisual);
+		}
 
 		window.setView(window.getDefaultView());
 		window.draw(hudPanel);
