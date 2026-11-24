@@ -9,6 +9,7 @@
 #include "ai/GridCollision.hpp"
 #include "ai/SkeletonDecision.hpp"
 #include "ai/SkeletonPathfinding.hpp"
+#include "ai/OgreDecision.hpp"
 
 #include <algorithm>
 #include <array>
@@ -553,6 +554,13 @@ int main()
 	arrowVisual.setOrigin({ 12.f, 2.f });
 	arrowVisual.setFillColor(sf::Color(210, 180, 115));
 
+	// The Ogre uses its own decision context and tree.
+	ai::EnemyContext ogreContext;
+	ogreContext.detectionRange = 450.f;
+	ogreContext.attackRange = 85.f;
+	ai::BehaviourTree ogreTree;
+	ai::buildOgreBehaviourTree(ogreTree);
+
 	sf::Font uiFont;
 	const bool uiFontLoaded = uiFont.openFromFile("C:/Windows/Fonts/arial.ttf");
 	sf::Text healthLabel(uiFont, "Player HP: 100 / 100", 22);
@@ -624,6 +632,12 @@ int main()
 		return ai::isFootprintClear(ground, arrowWidth, arrowHeight, dungeon,
 			static_cast<float>(tileSize), [](TileType tile) { return isWalkable(tile); }) &&
 			propCollisionFree(ground, arrowWidth, arrowHeight);
+	};
+	const auto ogreRayCanOccupy = [&](const sf::Vector2f& groundPosition)
+	{
+		return ai::isFootprintClear(groundPosition, 1.f, 1.f, dungeon,
+			static_cast<float>(tileSize), [](TileType tile) { return isWalkable(tile); }) &&
+			propCollisionFree(groundPosition, 1.f, 1.f);
 	};
 
 	sf::RectangleShape hudPanel({ 310.f, 92.f });
@@ -852,6 +866,28 @@ int main()
 		{
 			std::cout << "Player defeated.\n";
 			defeatReported = true;
+		}
+
+		// The stationary Ogre makes decisions using ground positions in world space.
+		ogreContext.enemyPosition = enemies[2].sprite.getTransform().transformPoint(
+			{ playerFrameSize / 2.f, 244.f });
+		ogreContext.playerPosition = playerGroundPosition;
+		ogreContext.hasLineOfSight = ai::hasClearLineOfSight(
+			ogreContext.enemyPosition, ogreContext.playerPosition, ogreRayCanOccupy, 12.f);
+		ai::updateOgreVisibility(ogreContext);
+		const ai::EnemyContext::Action previousOgreAction = ogreContext.currentAction;
+		ogreTree.tick(ogreContext, deltaTime);
+		if (ogreContext.currentAction != previousOgreAction)
+		{
+			const char* actionName = "Idle";
+			switch (ogreContext.currentAction)
+			{
+			case ai::EnemyContext::Action::Chase:       actionName = "Chase"; break;
+			case ai::EnemyContext::Action::HeavyAttack: actionName = "HeavyAttack"; break;
+			case ai::EnemyContext::Action::Recovery:    actionName = "Recovery"; break;
+			default: break;
+			}
+			std::cout << "Dungeon Ogre: " << actionName << '\n';
 		}
 
 		archerAnimationTime += deltaTime;

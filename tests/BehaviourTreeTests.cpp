@@ -7,6 +7,7 @@
 #include "ai/EnemyContext.hpp"
 #include "ai/GridCollision.hpp"
 #include "ai/LeafNodes.hpp"
+#include "ai/OgreDecision.hpp"
 #include "ai/SkeletonCombat.hpp"
 #include "ai/SkeletonDecision.hpp"
 #include "ai/SkeletonPathfinding.hpp"
@@ -588,6 +589,59 @@ namespace
                "Archer returns to Ranged Attack when movement restores line of sight");
     }
 
+    void testOgreDecision()
+    {
+        ai::BehaviourTree tree;
+        ai::buildOgreBehaviourTree(tree);
+        ai::EnemyContext context{};
+        context.detectionRange = 450.f;
+        context.attackRange = 85.f;
+        context.enemyPosition = { 500.f, 500.f };
+
+        const auto selectAt = [&](float distance, bool lineOfSight)
+        {
+            context.enemyPosition = { 500.f, 500.f };
+            context.playerPosition = { 500.f + distance, 500.f };
+            context.hasLineOfSight = lineOfSight;
+            context.attackCycleActive = false;
+            ai::updateOgreVisibility(context);
+            tree.tick(context, 0.016f);
+            return context.currentAction;
+        };
+
+        expect(selectAt(451.f, true) == ai::EnemyContext::Action::Idle,
+               "Ogre selects Idle outside its 450-unit detection range");
+        expect(selectAt(250.f, false) == ai::EnemyContext::Action::Chase,
+               "Ogre selects Chase inside detection range even without line of sight");
+        expect(selectAt(85.f, true) == ai::EnemyContext::Action::HeavyAttack &&
+               !context.attackCycleActive,
+               "Ogre selects HeavyAttack at 85 units with clear line of sight");
+        context.playerPosition = { context.enemyPosition.x + 250.f, context.enemyPosition.y };
+        context.hasLineOfSight = false;
+        ai::updateOgreVisibility(context);
+        tree.tick(context, 0.016f);
+        expect(context.currentAction == ai::EnemyContext::Action::Chase,
+               "Ogre can return to Chase before an attack cycle is started");
+        expect(selectAt(50.f, false) == ai::EnemyContext::Action::Chase,
+               "Ogre does not select HeavyAttack when line of sight is blocked");
+
+        context.currentAction = ai::EnemyContext::Action::Recovery;
+        context.attackCycleActive = true;
+        context.playerPosition = { context.enemyPosition.x + 250.f, context.enemyPosition.y };
+        context.hasLineOfSight = false;
+        ai::updateOgreVisibility(context);
+        const ai::NodeStatus recoveryStatus = tree.tick(context, 0.016f);
+        expect(context.currentAction == ai::EnemyContext::Action::Recovery &&
+               recoveryStatus == ai::NodeStatus::Running,
+               "Ogre Recovery remains active ahead of a valid Chase decision");
+
+        context.currentAction = ai::EnemyContext::Action::HeavyAttack;
+        const ai::NodeStatus attackStatus = tree.tick(context, 0.016f);
+        expect(context.currentAction == ai::EnemyContext::Action::HeavyAttack &&
+               attackStatus == ai::NodeStatus::Running,
+               "An active Ogre HeavyAttack cannot be preempted by Chase");
+    }
+
     void testSkeletonMovement()
     {
         ai::BehaviourTree tree;
@@ -905,6 +959,7 @@ int main()
     testArcherMovement();
     testArcherRepositionIntegration();
     testArcherCombat();
+    testOgreDecision();
     testSkeletonMovement();
     testAStarPathfinding();
     testCentralPassageNavigation();

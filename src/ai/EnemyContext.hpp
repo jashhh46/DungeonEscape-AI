@@ -38,7 +38,9 @@ namespace ai
             Search,
             Approach,
             RangedAttack,
-            Reposition
+            Reposition,
+            HeavyAttack,
+            Recovery
         };
 
         Action currentAction = Action::Idle;
