@@ -10,6 +10,9 @@
 #include "ai/OgreDecision.hpp"
 #include "ai/OgrePathfinding.hpp"
 #include "ai/OgreCombat.hpp"
+#include "ai/PlayerAttack.hpp"
+#include "ai/PlayerCombat.hpp"
+#include "ai/EnemyHealth.hpp"
 #include "ai/SkeletonCombat.hpp"
 #include "ai/SkeletonDecision.hpp"
 #include "ai/SkeletonPathfinding.hpp"
@@ -904,6 +907,125 @@ namespace
                "Ogre attack facing maps to the four Orc spritesheet direction rows");
     }
 
+    void testPlayerAttack()
+    {
+        ai::PlayerAttackState state;
+        expect(ai::pressPlayerAttack(state, 2) && state.animationActive &&
+               state.frame == 0 && state.facingRow == 2,
+               "A fresh Space press starts one attack facing the current direction");
+        expect(!ai::pressPlayerAttack(state, 3) && state.facingRow == 2,
+               "Holding Space does not restart or turn the active attack");
+
+        const ai::PlayerAttackUpdate secondFrame = ai::updatePlayerAttack(state, 0.125f);
+        expect(secondFrame.animationActive && secondFrame.frame == 1 &&
+               secondFrame.facingRow == 2,
+               "Player attack advances to its second directional frame");
+        const ai::PlayerAttackUpdate strikeFrame = ai::updatePlayerAttack(state, 0.125f);
+        expect(strikeFrame.animationActive && strikeFrame.frame == 2,
+               "Player attack reaches the visible strike frame");
+        const ai::PlayerAttackUpdate finalFrame = ai::updatePlayerAttack(state, 0.125f);
+        expect(finalFrame.animationActive && finalFrame.frame == 3,
+               "Player attack plays its final recovery frame");
+        const ai::PlayerAttackUpdate finished = ai::updatePlayerAttack(state, 0.125f);
+        expect(!finished.animationActive && !state.animationActive && state.frame == 0,
+               "Player attack ends after its four frames and returns to locomotion rendering");
+        expect(!ai::pressPlayerAttack(state, 1),
+               "Holding Space after an attack ends does not automatically start another");
+
+        ai::releasePlayerAttack(state);
+        expect(ai::pressPlayerAttack(state, 1) && state.animationActive &&
+               state.facingRow == 1,
+               "Releasing and pressing Space again starts a new attack");
+    }
+
+    void testPlayerCombat()
+    {
+        constexpr float playerWidth = 48.f;
+        constexpr float playerHeight = 28.f;
+        constexpr float skeletonWidth = 28.f;
+        constexpr float skeletonHeight = 18.f;
+        const sf::Vector2f playerGround{ 100.f, 100.f };
+        ai::PlayerAttackState attackState;
+        expect(ai::pressPlayerAttack(attackState, 3),
+               "Player combat test starts an attack facing right");
+        const ai::PlayerAttackUpdate secondFrame = ai::updatePlayerAttack(attackState, 0.125f);
+        expect(secondFrame.animationActive && secondFrame.frame == 1 &&
+               !secondFrame.damageFrame,
+               "Player attack does not damage before the third animation frame");
+        const ai::PlayerAttackUpdate impact = ai::updatePlayerAttack(attackState, 0.125f);
+        expect(impact.animationActive && impact.frame == ai::playerAttackImpactFrame &&
+               impact.damageFrame,
+               "Player attack reports one hit event on its third animation frame");
+
+        ai::EnemyHealth target{ 45 };
+        expect(ai::applyPlayerAttackDamage(impact, target, playerGround,
+                   playerWidth, playerHeight, { 180.f, 100.f },
+                   skeletonWidth, skeletonHeight, true) && target.current == 30,
+               "Player deals 15 damage to an enemy inside the 90-unit attack range");
+        const ai::PlayerAttackUpdate laterFrame = ai::updatePlayerAttack(attackState, 0.1f);
+        expect(!laterFrame.damageFrame &&
+               !ai::applyPlayerAttackDamage(laterFrame, target, playerGround,
+                   playerWidth, playerHeight, { 180.f, 100.f },
+                   skeletonWidth, skeletonHeight, true) && target.current == 30,
+               "One Player attack cycle cannot damage the same enemy more than once");
+
+        expect(!ai::playerAttackOverlapsEnemy(playerGround, playerWidth, playerHeight,
+                   { 230.f, 100.f }, skeletonWidth, skeletonHeight, 3) &&
+               !ai::playerAttackOverlapsEnemy(playerGround, playerWidth, playerHeight,
+                   { 60.f, 100.f }, skeletonWidth, skeletonHeight, 3),
+               "Player attack misses targets out of range or behind the facing direction");
+        expect(ai::playerAttackOverlapsEnemy(playerGround, playerWidth, playerHeight,
+                   { 60.f, 100.f }, skeletonWidth, skeletonHeight, 2) &&
+               ai::playerAttackOverlapsEnemy(playerGround, playerWidth, playerHeight,
+                   { 100.f, 160.f }, skeletonWidth, skeletonHeight, 0) &&
+               !ai::playerAttackOverlapsEnemy(playerGround, playerWidth, playerHeight,
+                   { 100.f, 160.f }, skeletonWidth, skeletonHeight, 1),
+               "Attack area follows left, down and up-facing directions correctly");
+
+        ai::EnemyHealth skeleton{ 45 };
+        ai::EnemyHealth archer{ 35 };
+        ai::EnemyHealth ogre{ 100 };
+        ai::EnemyHealth outside{ 100 };
+        expect(ai::applyPlayerAttackDamage(impact, skeleton, playerGround,
+                   playerWidth, playerHeight, { 150.f, 100.f }, 28.f, 18.f, true) &&
+               ai::applyPlayerAttackDamage(impact, archer, playerGround,
+                   playerWidth, playerHeight, { 170.f, 102.f }, 24.f, 16.f, true) &&
+               ai::applyPlayerAttackDamage(impact, ogre, playerGround,
+                   playerWidth, playerHeight, { 185.f, 100.f }, 32.f, 20.f, true) &&
+               !ai::applyPlayerAttackDamage(impact, outside, playerGround,
+                   playerWidth, playerHeight, { 240.f, 100.f }, 32.f, 20.f, true) &&
+               skeleton.current == 30 && archer.current == 20 && ogre.current == 85 &&
+               outside.current == 100,
+               "One swing can hit several enemies only when each foot box is in its attack area");
+
+        std::array<std::array<int, 6>, 4> wallGrid{};
+        wallGrid[1][2] = 1;
+        const auto rayCanOccupy = [&wallGrid](const sf::Vector2f& point)
+        {
+            return ai::isFootprintClear(point, 1.f, 1.f, wallGrid, 32.f,
+                [](int tile) { return tile == 0; });
+        };
+        const bool clearShot = ai::hasClearLineOfSight(
+            { 24.f, 48.f }, { 104.f, 48.f }, rayCanOccupy, 4.f);
+        ai::EnemyHealth behindWall{ 45 };
+        expect(!clearShot && !ai::applyPlayerAttackDamage(impact, behindWall,
+                   { 24.f, 48.f }, playerWidth, playerHeight, { 104.f, 48.f },
+                   skeletonWidth, skeletonHeight, clearShot) && behindWall.current == 45,
+               "Player attack cannot pass through a blocking wall");
+
+        ai::EnemyHealth defeated{ 15 };
+        expect(ai::applyPlayerAttackDamage(impact, defeated, playerGround,
+                   playerWidth, playerHeight, { 150.f, 100.f },
+                   skeletonWidth, skeletonHeight, true) && defeated.current == 0 &&
+               defeated.isDefeated() && !defeated.takeDamage(15),
+               "Enemy health reaches zero and defeated enemies cannot take more damage");
+
+        expect(ai::EnemyHealth{ 45 }.maximum == 45 &&
+               ai::EnemyHealth{ 35 }.current == 35 &&
+               ai::EnemyHealth{ 100 }.current == 100,
+               "Enemy health starts at the requested values for all three roles");
+    }
+
     void testSkeletonMovement()
     {
         ai::BehaviourTree tree;
@@ -1224,6 +1346,8 @@ int main()
     testOgreDecision();
     testOgrePathfinding();
     testOgreCombat();
+    testPlayerAttack();
+    testPlayerCombat();
     testSkeletonMovement();
     testAStarPathfinding();
     testCentralPassageNavigation();

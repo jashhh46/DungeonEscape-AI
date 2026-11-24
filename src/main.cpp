@@ -12,6 +12,9 @@
 #include "ai/OgreDecision.hpp"
 #include "ai/OgrePathfinding.hpp"
 #include "ai/OgreCombat.hpp"
+#include "ai/PlayerAttack.hpp"
+#include "ai/EnemyHealth.hpp"
+#include "ai/PlayerCombat.hpp"
 
 #include <algorithm>
 #include <array>
@@ -189,6 +192,10 @@ int main()
 	constexpr float playerColliderTopOffset = 90.f;
 	constexpr float skeletonColliderWidth = 28.f;
 	constexpr float skeletonColliderHeight = 18.f;
+	constexpr std::array<float, 3> enemyFootWidths{
+		skeletonColliderWidth, ai::archerFootWidth, ai::ogreFootWidth };
+	constexpr std::array<float, 3> enemyFootHeights{
+		skeletonColliderHeight, ai::archerFootHeight, ai::ogreFootHeight };
 	constexpr float skeletonNavigationGroundOffset = 104.f;
 	// Keep the Player's visible art inside the world without using padded art as the collider.
 	constexpr float visibleLeftExtent = 88.f;
@@ -542,11 +549,20 @@ int main()
 	}
 	playerWalkTexture.setSmooth(false);
 
+	sf::Texture playerAttackTexture;
+	if (!playerAttackTexture.loadFromFile("Assets/characters/boss/boss_attack_sheet.png"))
+	{
+		std::cerr << "Could not load the Player attack spritesheet.\n";
+		return 1;
+	}
+	playerAttackTexture.setSmooth(false);
+
 	// The Player uses the supplied character sheets for appearance only.
 	// Their rows face down, up, left, and right; frames are 256x256.
 	sf::Sprite player(playerIdleTexture, sf::IntRect({ 0, 0 }, { playerFrameSize, playerFrameSize }));
 	player.setOrigin({ playerFrameSize / 2.f, playerFrameSize / 2.f });
 	player.setPosition(playerStartPosition);
+	ai::PlayerAttackState playerAttackState;
 
 	// The first enemy is the Skeleton Guard; its context and tree belong to this instance.
 	ai::EnemyContext skeletonContext;
@@ -558,6 +574,9 @@ int main()
 	ai::buildSkeletonBehaviourTree(skeletonTree);
 	ai::SkeletonAttackState skeletonAttack;
 	ai::PlayerHealth playerHealth;
+	std::array<ai::EnemyHealth, enemySpawns.size()> enemyHealth{
+		ai::EnemyHealth{ 45 }, ai::EnemyHealth{ 35 }, ai::EnemyHealth{ 100 }
+	};
 
 	// Archer AI is separate from the Skeleton's decision tree and state.
 	ai::EnemyContext archerContext;
@@ -591,6 +610,7 @@ int main()
 
 	sf::RenderWindow window(sf::VideoMode({ windowWidth, windowHeight }), "Dungeon Escape");
 	window.setFramerateLimit(60);
+	window.setKeyRepeatEnabled(false);
 	sf::View camera(sf::FloatRect({ 0.f, 0.f },
 		{ static_cast<float>(windowWidth), static_cast<float>(windowHeight) }));
 
@@ -686,6 +706,15 @@ int main()
 	sf::RectangleShape healthBar({ 280.f, 24.f });
 	healthBar.setPosition({ 26.f, 58.f });
 	healthBar.setFillColor(sf::Color(80, 190, 95));
+	std::array<sf::RectangleShape, enemySpawns.size()> enemyHealthBackgrounds;
+	std::array<sf::RectangleShape, enemySpawns.size()> enemyHealthBars;
+	for (std::size_t i = 0; i < enemySpawns.size(); ++i)
+	{
+		enemyHealthBackgrounds[i].setSize({ 64.f, 7.f });
+		enemyHealthBackgrounds[i].setFillColor(sf::Color(40, 20, 20));
+		enemyHealthBars[i].setSize({ 64.f, 7.f });
+		enemyHealthBars[i].setFillColor(sf::Color(210, 55, 50));
+	}
 	sf::Text defeatTitle(uiFont, "DEFEAT", 64);
 	defeatTitle.setFillColor(sf::Color(235, 80, 70));
 	defeatTitle.setPosition({ 400.f, 330.f });
@@ -711,19 +740,33 @@ int main()
 		{
 			if (event->is<sf::Event::Closed>())
 				window.close();
+			if (const auto* keyPressed = event->getIf<sf::Event::KeyPressed>())
+			{
+				if (keyPressed->code == sf::Keyboard::Key::Space && playerHealth.current > 0)
+					ai::pressPlayerAttack(playerAttackState, facingRow);
+			}
+			if (const auto* keyReleased = event->getIf<sf::Event::KeyReleased>())
+			{
+				if (keyReleased->code == sf::Keyboard::Key::Space)
+					ai::releasePlayerAttack(playerAttackState);
+			}
 		}
 		if (!window.isOpen())
 			break;
 
 		const float deltaTime = std::min(deltaClock.restart().asSeconds(), 0.1f);
 		sf::Vector2f direction{};
-		if (playerHealth.current > 0 && sf::Keyboard::isKeyPressed(sf::Keyboard::Key::W))
+		if (playerHealth.current > 0 && !playerAttackState.animationActive &&
+			sf::Keyboard::isKeyPressed(sf::Keyboard::Key::W))
 			direction.y -= 1.f;
-		if (playerHealth.current > 0 && sf::Keyboard::isKeyPressed(sf::Keyboard::Key::S))
+		if (playerHealth.current > 0 && !playerAttackState.animationActive &&
+			sf::Keyboard::isKeyPressed(sf::Keyboard::Key::S))
 			direction.y += 1.f;
-		if (playerHealth.current > 0 && sf::Keyboard::isKeyPressed(sf::Keyboard::Key::A))
+		if (playerHealth.current > 0 && !playerAttackState.animationActive &&
+			sf::Keyboard::isKeyPressed(sf::Keyboard::Key::A))
 			direction.x -= 1.f;
-		if (playerHealth.current > 0 && sf::Keyboard::isKeyPressed(sf::Keyboard::Key::D))
+		if (playerHealth.current > 0 && !playerAttackState.animationActive &&
+			sf::Keyboard::isKeyPressed(sf::Keyboard::Key::D))
 			direction.x += 1.f;
 
 		const float directionLength = std::sqrt(direction.x * direction.x + direction.y * direction.y);
@@ -753,6 +796,8 @@ int main()
 		if (canOccupy(candidate))
 			newPosition.y = candidate.y;
 		player.setPosition(newPosition);
+		const ai::PlayerAttackUpdate playerAttackUpdate =
+			ai::updatePlayerAttack(playerAttackState, deltaTime);
 
 		// Use the player's collision-foot bottom and the Skeleton's visible foot line.
 		const sf::Vector2f playerGroundPosition{
@@ -760,6 +805,26 @@ int main()
 			player.getPosition().y + playerColliderTopOffset + playerColliderHeight
 		};
 		constexpr float skeletonFootYInFrame = 244.f;
+		if (playerAttackUpdate.damageFrame)
+		{
+			for (std::size_t i = 0; i < enemies.size(); ++i)
+			{
+				if (enemyHealth[i].isDefeated())
+					continue;
+				const sf::Vector2f enemyGround = enemies[i].sprite.getTransform().transformPoint(
+					{ playerFrameSize / 2.f, skeletonFootYInFrame });
+				const bool clearLineOfSight = ai::hasClearLineOfSight(
+					playerGroundPosition, enemyGround, ogreRayCanOccupy, 8.f);
+				if (ai::applyPlayerAttackDamage(playerAttackUpdate, enemyHealth[i],
+					playerGroundPosition, playerColliderWidth, playerColliderHeight,
+					enemyGround, enemyFootWidths[i], enemyFootHeights[i], clearLineOfSight))
+				{
+					std::cout << "Player hit " << enemySpawns[i].role << " for "
+						<< ai::playerAttackDamage << " damage ("
+						<< enemyHealth[i].current << " HP remaining).\n";
+				}
+			}
+		}
 		skeletonContext.enemyPosition = enemies[0].sprite.getTransform().transformPoint(
 			{ playerFrameSize / 2.f, skeletonFootYInFrame });
 		skeletonContext.playerPosition = playerGroundPosition;
@@ -768,12 +833,13 @@ int main()
 		skeletonContext.hasLineOfSight = ai::hasClearLineOfSight(
 			skeletonContext.enemyPosition, skeletonContext.playerPosition, skeletonCanOccupy, 12.f);
 		const ai::EnemyContext::Action previousSkeletonAction = skeletonContext.currentAction;
-		if (playerHealth.current > 0)
+		if (playerHealth.current > 0 && !enemyHealth[0].isDefeated())
 			skeletonTree.tick(skeletonContext, deltaTime);
 		else
 		{
 			skeletonContext.currentAction = ai::EnemyContext::Action::Idle;
 			skeletonContext.moveDirection = { 0.f, 0.f };
+			skeletonContext.playerVisible = false;
 		}
 		if (skeletonContext.currentAction != previousSkeletonAction)
 		{
@@ -821,7 +887,14 @@ int main()
 			archerContext.enemyPosition, archerContext.playerPosition, archerRayCanOccupy, 12.f);
 		ai::updateArcherVisibility(archerContext);
 		const ai::EnemyContext::Action previousArcherAction = archerContext.currentAction;
-		archerTree.tick(archerContext, deltaTime);
+		if (playerHealth.current > 0 && !enemyHealth[1].isDefeated())
+			archerTree.tick(archerContext, deltaTime);
+		else
+		{
+			archerContext.currentAction = ai::EnemyContext::Action::Idle;
+			archerContext.moveDirection = { 0.f, 0.f };
+			archerContext.playerVisible = false;
+		}
 		if (archerContext.currentAction != previousArcherAction)
 		{
 			const char* actionName = "Idle";
@@ -871,9 +944,12 @@ int main()
 				archerFacingRow = toPlayer.y > 0.f ? 0 : 1;
 		}
 
-		const int archerHits = ai::updateArcherProjectiles(archerProjectiles,
-			deltaTime, playerGroundPosition, playerColliderWidth, playerColliderHeight,
-			playerHealth, arrowCanOccupy);
+		if (enemyHealth[1].isDefeated())
+			archerProjectiles.clear();
+		const int archerHits = enemyHealth[1].isDefeated() ? 0 :
+			ai::updateArcherProjectiles(archerProjectiles,
+				deltaTime, playerGroundPosition, playerColliderWidth, playerColliderHeight,
+				playerHealth, arrowCanOccupy);
 		if (archerHits > 0)
 			std::cout << "Player hit by Goblin Archer: " << playerHealth.current
 				<< " HP remaining.\n";
@@ -883,6 +959,7 @@ int main()
 
 		const ai::ArcherAttackUpdate archerAttackUpdate = ai::updateArcherAttack(
 			archerAttackState,
+			!enemyHealth[1].isDefeated() &&
 			archerContext.currentAction == ai::EnemyContext::Action::RangedAttack,
 			deltaTime);
 		if (archerAttackUpdate.releaseProjectile)
@@ -912,9 +989,21 @@ int main()
 			ogreContext.enemyPosition, ogreContext.playerPosition, ogreRayCanOccupy, 12.f);
 		ai::updateOgreVisibility(ogreContext);
 		const ai::EnemyContext::Action previousOgreAction = ogreContext.currentAction;
-		ogreTree.tick(ogreContext, deltaTime);
-		const ai::OgreCombatUpdate ogreAttackUpdate = ai::updateOgreCombat(
-			ogreCombatState, ogreContext, playerHealth, deltaTime);
+		ai::OgreCombatUpdate ogreAttackUpdate{};
+		if (!enemyHealth[2].isDefeated())
+		{
+			ogreTree.tick(ogreContext, deltaTime);
+			ogreAttackUpdate = ai::updateOgreCombat(
+				ogreCombatState, ogreContext, playerHealth, deltaTime);
+		}
+		else
+		{
+			ogreContext.currentAction = ai::EnemyContext::Action::Idle;
+			ogreContext.moveDirection = { 0.f, 0.f };
+			ogreContext.playerVisible = false;
+			ogreContext.attackCycleActive = false;
+			ogreCombatState = {};
+		}
 		if (ogreAttackUpdate.attackStarted)
 			ogreFacingRow = ai::ogreFacingRow(ogreContext.enemyPosition,
 				ogreContext.playerPosition);
@@ -1022,14 +1111,25 @@ int main()
 				{ playerFrameSize, playerFrameSize }));
 		}
 
-		const bool isWalking = newPosition.x != oldPosition.x || newPosition.y != oldPosition.y;
-		animationTime += deltaTime;
-		const float animationFramesPerSecond = isWalking ? walkFramesPerSecond : idleFramesPerSecond;
-		const int frame = static_cast<int>(animationTime * animationFramesPerSecond) % animationFrameCount;
-		player.setTexture(isWalking ? playerWalkTexture : playerIdleTexture);
-		player.setTextureRect(sf::IntRect(
-			{ frame * playerFrameSize, facingRow * playerFrameSize },
-			{ playerFrameSize, playerFrameSize }));
+		if (playerAttackUpdate.animationActive)
+		{
+			player.setTexture(playerAttackTexture);
+			player.setTextureRect(sf::IntRect(
+				{ playerAttackUpdate.frame * playerFrameSize,
+					playerAttackUpdate.facingRow * playerFrameSize },
+				{ playerFrameSize, playerFrameSize }));
+		}
+		else
+		{
+			const bool isWalking = newPosition.x != oldPosition.x || newPosition.y != oldPosition.y;
+			animationTime += deltaTime;
+			const float animationFramesPerSecond = isWalking ? walkFramesPerSecond : idleFramesPerSecond;
+			const int frame = static_cast<int>(animationTime * animationFramesPerSecond) % animationFrameCount;
+			player.setTexture(isWalking ? playerWalkTexture : playerIdleTexture);
+			player.setTextureRect(sf::IntRect(
+				{ frame * playerFrameSize, facingRow * playerFrameSize },
+				{ playerFrameSize, playerFrameSize }));
+		}
 
 		const sf::Vector2f viewSize = camera.getSize();
 		sf::Vector2f cameraCenter = player.getPosition();
@@ -1089,6 +1189,22 @@ int main()
 			});
 		for (const DepthItem& item : depthItems)
 			window.draw(*item.sprite);
+		for (std::size_t i = 0; i < enemies.size(); ++i)
+		{
+			const float barWidth = 72.f * enemySpawns[i].scale;
+			const float barHeight = 7.f;
+			const sf::Vector2f barAnchor = enemies[i].sprite.getTransform().transformPoint(
+				{ playerFrameSize / 2.f, 52.f });
+			const sf::Vector2f barPosition{ barAnchor.x - barWidth / 2.f,
+				barAnchor.y - 14.f };
+			enemyHealthBackgrounds[i].setSize({ barWidth, barHeight });
+			enemyHealthBackgrounds[i].setPosition(barPosition);
+			enemyHealthBars[i].setSize({ barWidth * enemyHealth[i].current /
+				static_cast<float>(enemyHealth[i].maximum), barHeight });
+			enemyHealthBars[i].setPosition(barPosition);
+			window.draw(enemyHealthBackgrounds[i]);
+			window.draw(enemyHealthBars[i]);
+		}
 		for (const ai::ArcherProjectile& projectile : archerProjectiles)
 		{
 			const float angle = std::atan2(projectile.velocity.y, projectile.velocity.x) *
