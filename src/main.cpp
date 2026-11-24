@@ -570,7 +570,7 @@ int main()
 	skeletonContext.detectionRange = 375.f;
 	skeletonContext.attackRange = 60.f;
 	skeletonContext.attackRangeBuffer = 10.f;
-	skeletonContext.moveSpeed = 100.f;
+	skeletonContext.moveSpeed = ai::skeletonMoveSpeed;
 	ai::BehaviourTree skeletonTree;
 	ai::buildSkeletonBehaviourTree(skeletonTree);
 	ai::SkeletonAttackState skeletonAttack;
@@ -761,7 +761,7 @@ int main()
 		skeletonContext.detectionRange = 375.f;
 		skeletonContext.attackRange = 60.f;
 		skeletonContext.attackRangeBuffer = 10.f;
-		skeletonContext.moveSpeed = 100.f;
+		skeletonContext.moveSpeed = ai::skeletonMoveSpeed;
 		skeletonContext.enemyPosition = enemies[0].sprite.getTransform().transformPoint(
 			{ playerFrameSize / 2.f, 244.f });
 		skeletonContext.playerPosition = playerStartGround;

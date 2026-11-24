@@ -9,6 +9,8 @@
 
 namespace ai
 {
+    inline constexpr float skeletonMoveSpeed = 100.f * 4.0f / 3.0f;
+
     struct SkeletonPathState
     {
         std::vector<GridCell> path;

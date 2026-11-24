@@ -699,6 +699,22 @@ namespace
         expect(moveState.path == originalPath && moveState.destination == ai::GridCell{ 5, 3 },
                "Ogre keeps its path while the Player remains in the same destination cell");
 
+        const sf::Vector2f beforeAttackStop = mover.enemyPosition;
+        const std::size_t waypointBeforeStop = moveState.nextWaypoint;
+        mover.currentAction = ai::EnemyContext::Action::HeavyAttack;
+        const sf::Vector2f attackStop = ai::followOgrePath(mover, moveState,
+            0.1f, grid, tileSize, cellWalkable, canOccupy);
+        expect(attackStop == sf::Vector2f{ 0.f, 0.f } &&
+               mover.enemyPosition == beforeAttackStop &&
+               moveState.path == originalPath && moveState.nextWaypoint == waypointBeforeStop,
+               "Ogre stops during HeavyAttack without discarding its current route");
+        mover.currentAction = ai::EnemyContext::Action::Chase;
+        const sf::Vector2f resumedMovement = ai::followOgrePath(mover, moveState,
+            0.1f, grid, tileSize, cellWalkable, canOccupy);
+        expect(resumedMovement.x > 0.f && mover.enemyPosition.x > beforeAttackStop.x &&
+               moveState.path == originalPath,
+               "Ogre resumes forward on the cached route instead of backtracking to its start cell");
+
         auto obstacleGrid = makeGrid();
         obstacleGrid[3][3] = 1;
         const auto obstacleCanOccupy = [&obstacleGrid, tileSize](const sf::Vector2f& point)
@@ -807,6 +823,7 @@ namespace
                "Ogre moves through the central passage without entering blocked tiles");
 
         const sf::Vector2f beforeStop = passageChase.enemyPosition;
+        const std::vector<ai::GridCell> routeBeforeStop = passageState.path;
         passageChase.currentAction = ai::EnemyContext::Action::HeavyAttack;
         passageChase.moveDirection = { 1.f, 0.f };
         const sf::Vector2f stopped = ai::followOgrePath(passageChase,
@@ -814,8 +831,8 @@ namespace
         expect(stopped == sf::Vector2f{ 0.f, 0.f } &&
                passageChase.enemyPosition == beforeStop &&
                passageChase.moveDirection == sf::Vector2f{ 0.f, 0.f } &&
-               passageState.path.empty(),
-               "Ogre stops and clears its route when HeavyAttack is selected");
+               passageState.path == routeBeforeStop,
+               "Ogre stops and preserves its route when HeavyAttack is selected");
     }
 
     void testOgreCombat()
@@ -1164,6 +1181,37 @@ namespace
                "Foot collision prevents the Skeleton entering a blocked tile");
         expect(!canOccupy({ 7.f, 20.f }),
                "Foot collision rejects positions beyond the dungeon boundary");
+
+        expect(std::abs(ai::skeletonMoveSpeed - 100.f * 4.f / 3.f) < 0.0001f,
+               "Skeleton speed is increased by exactly one-third from 100 units per second");
+
+        std::array<std::array<int, 8>, 3> speedGrid{};
+        const auto speedWalkable = [](ai::GridCell cell)
+        {
+            return cell.column >= 0 && cell.column < 8 && cell.row >= 0 && cell.row < 3;
+        };
+        ai::EnemyContext fasterSkeleton{};
+        fasterSkeleton.currentAction = ai::EnemyContext::Action::Chase;
+        fasterSkeleton.enemyPosition = ai::gridCellWaypoint({ 1, 1 }, 128.f);
+        fasterSkeleton.playerPosition = ai::gridCellWaypoint({ 7, 1 }, 128.f);
+        fasterSkeleton.attackRange = 0.f;
+        fasterSkeleton.moveSpeed = ai::skeletonMoveSpeed;
+        ai::SkeletonPathState fasterSkeletonPath;
+        const float skeletonStartX = fasterSkeleton.enemyPosition.x;
+        const sf::Vector2f speedStep = ai::followSkeletonPath(
+            fasterSkeleton, fasterSkeletonPath, 0.1f, speedGrid, 128.f,
+            speedWalkable, [](const sf::Vector2f&) { return true; });
+        expect(std::abs(speedStep.x - ai::skeletonMoveSpeed * 0.1f) < 0.01f,
+               "Faster Skeleton movement uses the configured speed and delta time");
+        for (int frame = 1; frame < 30; ++frame)
+            ai::followSkeletonPath(fasterSkeleton, fasterSkeletonPath, 0.1f,
+                speedGrid, 128.f, speedWalkable,
+                [](const sf::Vector2f&) { return true; });
+        expect(fasterSkeleton.enemyPosition.x < fasterSkeleton.playerPosition.x &&
+               fasterSkeleton.enemyPosition.x > skeletonStartX &&
+               !fasterSkeletonPath.pathFailed &&
+               ai::isPathValid(fasterSkeletonPath.path, speedWalkable),
+               "Faster Skeleton follows A* waypoints without overshooting or losing its path");
     }
 
     void testAStarPathfinding()

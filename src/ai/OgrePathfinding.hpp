@@ -34,7 +34,6 @@ namespace ai
     {
         if (context.currentAction != EnemyContext::Action::Chase)
         {
-            state = {};
             context.moveDirection = { 0.f, 0.f };
             return { 0.f, 0.f };
         }
