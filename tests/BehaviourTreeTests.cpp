@@ -8,6 +8,7 @@
 #include "ai/GridCollision.hpp"
 #include "ai/LeafNodes.hpp"
 #include "ai/OgreDecision.hpp"
+#include "ai/OgrePathfinding.hpp"
 #include "ai/SkeletonCombat.hpp"
 #include "ai/SkeletonDecision.hpp"
 #include "ai/SkeletonPathfinding.hpp"
@@ -642,6 +643,176 @@ namespace
                "An active Ogre HeavyAttack cannot be preempted by Chase");
     }
 
+    void testOgrePathfinding()
+    {
+        constexpr int size = 8;
+        constexpr float tileSize = 128.f;
+        using TestGrid = std::array<std::array<int, size>, size>;
+        const auto makeGrid = [=]
+        {
+            TestGrid grid{};
+            for (int i = 0; i < size; ++i)
+            {
+                grid[0][i] = grid[size - 1][i] = 1;
+                grid[i][0] = grid[i][size - 1] = 1;
+            }
+            return grid;
+        };
+
+        auto grid = makeGrid();
+        const auto canOccupy = [&grid, tileSize](const sf::Vector2f& point)
+        {
+            return ai::isFootprintClear(point, ai::ogreFootWidth,
+                ai::ogreFootHeight, grid, tileSize,
+                [](int tile) { return tile == 0; });
+        };
+        const auto cellWalkable = [&grid, tileSize, size](ai::GridCell cell)
+        {
+            if (cell.column < 0 || cell.column >= size || cell.row < 0 || cell.row >= size)
+                return false;
+            return ai::isFootprintClear(ai::gridCellWaypoint(cell, tileSize,
+                ai::ogreNavigationGroundOffset), ai::ogreFootWidth,
+                ai::ogreFootHeight, grid, tileSize,
+                [](int tile) { return tile == 0; });
+        };
+
+        ai::EnemyContext mover{};
+        mover.currentAction = ai::EnemyContext::Action::Chase;
+        mover.enemyPosition = ai::gridCellWaypoint({ 1, 3 }, tileSize,
+            ai::ogreNavigationGroundOffset);
+        mover.playerPosition = ai::gridCellWaypoint({ 5, 3 }, tileSize,
+            ai::ogreNavigationGroundOffset);
+        mover.attackRange = 32.f;
+        mover.moveSpeed = 65.f;
+        ai::OgrePathState moveState;
+        const sf::Vector2f firstStep = ai::followOgrePath(mover, moveState,
+            0.5f, grid, tileSize, cellWalkable, canOccupy);
+        const std::vector<ai::GridCell> originalPath = moveState.path;
+        ai::followOgrePath(mover, moveState, 0.1f, grid, tileSize, cellWalkable, canOccupy);
+        expect(std::abs(std::sqrt(firstStep.x * firstStep.x + firstStep.y * firstStep.y) - 32.5f) < 0.01f,
+               "Ogre Chase movement uses 65 units per second and delta time");
+        expect(moveState.path == originalPath && moveState.destination == ai::GridCell{ 5, 3 },
+               "Ogre keeps its path while the Player remains in the same destination cell");
+
+        auto obstacleGrid = makeGrid();
+        obstacleGrid[3][3] = 1;
+        const auto obstacleCanOccupy = [&obstacleGrid, tileSize](const sf::Vector2f& point)
+        {
+            return ai::isFootprintClear(point, ai::ogreFootWidth,
+                ai::ogreFootHeight, obstacleGrid, tileSize,
+                [](int tile) { return tile == 0; });
+        };
+        const auto obstacleWalkable = [&obstacleGrid, tileSize, size](ai::GridCell cell)
+        {
+            if (cell.column < 0 || cell.column >= size || cell.row < 0 || cell.row >= size)
+                return false;
+            return ai::isFootprintClear(ai::gridCellWaypoint(cell, tileSize,
+                ai::ogreNavigationGroundOffset), ai::ogreFootWidth,
+                ai::ogreFootHeight, obstacleGrid, tileSize,
+                [](int tile) { return tile == 0; });
+        };
+        ai::EnemyContext obstacleChase{};
+        obstacleChase.currentAction = ai::EnemyContext::Action::Chase;
+        obstacleChase.enemyPosition = ai::gridCellWaypoint({ 2, 3 }, tileSize,
+            ai::ogreNavigationGroundOffset);
+        obstacleChase.playerPosition = ai::gridCellWaypoint({ 5, 3 }, tileSize,
+            ai::ogreNavigationGroundOffset);
+        obstacleChase.attackRange = 32.f;
+        obstacleChase.moveSpeed = 65.f;
+        ai::OgrePathState obstacleState;
+        for (int frame = 0; frame < 180; ++frame)
+        {
+            ai::followOgrePath(obstacleChase, obstacleState, 0.1f,
+                obstacleGrid, tileSize, obstacleWalkable, obstacleCanOccupy);
+            if (!obstacleCanOccupy(obstacleChase.enemyPosition))
+                break;
+        }
+        const bool routeAvoidsBlock = std::any_of(obstacleState.path.begin(),
+            obstacleState.path.end(), [](ai::GridCell cell)
+            {
+                return cell.column == 3 && cell.row != 3;
+            });
+        expect(!obstacleState.pathFailed && ai::isPathValid(obstacleState.path, obstacleWalkable) &&
+               routeAvoidsBlock,
+               "Ogre A* routes around a blocking obstacle with its foot-sized clearance");
+        expect(obstacleCanOccupy(obstacleChase.enemyPosition) &&
+               std::abs(ai::ogreDistance(obstacleChase) - obstacleChase.attackRange) < 1.f,
+               "Ogre reaches attack distance without crossing the obstacle or the Player");
+
+        auto dungeon = std::array<std::array<int, 28>, 16>{};
+        constexpr int columns = 28;
+        constexpr int rows = 16;
+        for (int row = 0; row < rows; ++row)
+            for (int column = 0; column < columns; ++column)
+                if (row == 0 || row == rows - 1 || column == 0 || column == columns - 1)
+                    dungeon[row][column] = 1;
+        for (int row = 1; row < rows - 1; ++row)
+        {
+            if (row >= 6 && row <= 9)
+                continue;
+            dungeon[row][13] = 1;
+            dungeon[row][14] = 1;
+        }
+        dungeon[4][5] = 1;
+        dungeon[11][16] = 1;
+        const auto dungeonCanOccupy = [&dungeon, tileSize](const sf::Vector2f& point)
+        {
+            return ai::isFootprintClear(point, ai::ogreFootWidth,
+                ai::ogreFootHeight, dungeon, tileSize,
+                [](int tile) { return tile == 0; });
+        };
+        const auto dungeonWalkable = [&dungeon, tileSize, columns, rows](ai::GridCell cell)
+        {
+            if (cell.column < 0 || cell.column >= columns || cell.row < 0 || cell.row >= rows)
+                return false;
+            return ai::isFootprintClear(ai::gridCellWaypoint(cell, tileSize,
+                ai::ogreNavigationGroundOffset), ai::ogreFootWidth,
+                ai::ogreFootHeight, dungeon, tileSize,
+                [](int tile) { return tile == 0; });
+        };
+        ai::EnemyContext passageChase{};
+        passageChase.currentAction = ai::EnemyContext::Action::Chase;
+        passageChase.enemyPosition = ai::gridCellWaypoint({ 10, 7 }, tileSize,
+            ai::ogreNavigationGroundOffset);
+        passageChase.playerPosition = ai::gridCellWaypoint({ 17, 7 }, tileSize,
+            ai::ogreNavigationGroundOffset);
+        passageChase.attackRange = 85.f;
+        passageChase.moveSpeed = 65.f;
+        ai::OgrePathState passageState;
+        bool crossedPassage = false;
+        for (int frame = 0; frame < 400; ++frame)
+        {
+            ai::followOgrePath(passageChase, passageState, 0.1f,
+                dungeon, tileSize, dungeonWalkable, dungeonCanOccupy);
+            if (passageChase.enemyPosition.x >= 15.f * tileSize)
+                crossedPassage = true;
+            if (!dungeonCanOccupy(passageChase.enemyPosition))
+                break;
+        }
+        const bool pathUsesOpening = std::any_of(passageState.path.begin(),
+            passageState.path.end(), [](ai::GridCell cell)
+            {
+                return (cell.column == 13 || cell.column == 14) &&
+                    cell.row >= 6 && cell.row <= 9;
+            });
+        expect(!passageState.pathFailed && ai::isPathValid(passageState.path, dungeonWalkable) &&
+               pathUsesOpening,
+               "Ogre pathfinding uses the central passage between dungeon rooms");
+        expect(crossedPassage && dungeonCanOccupy(passageChase.enemyPosition),
+               "Ogre moves through the central passage without entering blocked tiles");
+
+        const sf::Vector2f beforeStop = passageChase.enemyPosition;
+        passageChase.currentAction = ai::EnemyContext::Action::HeavyAttack;
+        passageChase.moveDirection = { 1.f, 0.f };
+        const sf::Vector2f stopped = ai::followOgrePath(passageChase,
+            passageState, 0.5f, dungeon, tileSize, dungeonWalkable, dungeonCanOccupy);
+        expect(stopped == sf::Vector2f{ 0.f, 0.f } &&
+               passageChase.enemyPosition == beforeStop &&
+               passageChase.moveDirection == sf::Vector2f{ 0.f, 0.f } &&
+               passageState.path.empty(),
+               "Ogre stops and clears its route when HeavyAttack is selected");
+    }
+
     void testSkeletonMovement()
     {
         ai::BehaviourTree tree;
@@ -960,6 +1131,7 @@ int main()
     testArcherRepositionIntegration();
     testArcherCombat();
     testOgreDecision();
+    testOgrePathfinding();
     testSkeletonMovement();
     testAStarPathfinding();
     testCentralPassageNavigation();

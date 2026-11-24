@@ -10,6 +10,7 @@
 #include "ai/SkeletonDecision.hpp"
 #include "ai/SkeletonPathfinding.hpp"
 #include "ai/OgreDecision.hpp"
+#include "ai/OgrePathfinding.hpp"
 
 #include <algorithm>
 #include <array>
@@ -313,6 +314,14 @@ int main()
 	}
 	archerAttackTexture.setSmooth(false);
 
+	sf::Texture ogreWalkTexture;
+	if (!ogreWalkTexture.loadFromFile("Assets/characters/orc/orc_walk_sheet.png"))
+	{
+		std::cerr << "Could not load the Dungeon Ogre walk spritesheet.\n";
+		return 1;
+	}
+	ogreWalkTexture.setSmooth(false);
+
 	sf::Texture floorTexture;
 	if (!floorTexture.loadFromFile("Assets/tileset/floor_plain.png"))
 	{
@@ -558,8 +567,10 @@ int main()
 	ai::EnemyContext ogreContext;
 	ogreContext.detectionRange = 450.f;
 	ogreContext.attackRange = 85.f;
+	ogreContext.moveSpeed = 65.f;
 	ai::BehaviourTree ogreTree;
 	ai::buildOgreBehaviourTree(ogreTree);
+	ai::OgrePathState ogrePathState;
 
 	sf::Font uiFont;
 	const bool uiFontLoaded = uiFont.openFromFile("C:/Windows/Fonts/arial.ttf");
@@ -639,6 +650,19 @@ int main()
 			static_cast<float>(tileSize), [](TileType tile) { return isWalkable(tile); }) &&
 			propCollisionFree(groundPosition, 1.f, 1.f);
 	};
+	const auto ogreCanOccupy = [&](const sf::Vector2f& groundPosition)
+	{
+		return ai::isFootprintClear(groundPosition, ai::ogreFootWidth,
+			ai::ogreFootHeight, dungeon, static_cast<float>(tileSize),
+			[](TileType tile) { return isWalkable(tile); }) &&
+			propCollisionFree(groundPosition, ai::ogreFootWidth, ai::ogreFootHeight);
+	};
+	const auto ogreCellWalkable = [&](ai::GridCell cell)
+	{
+		const sf::Vector2f ground = ai::gridCellWaypoint(cell,
+			static_cast<float>(tileSize), ai::ogreNavigationGroundOffset);
+		return ogreCanOccupy(ground);
+	};
 
 	sf::RectangleShape hudPanel({ 310.f, 92.f });
 	hudPanel.setPosition({ 16.f, 16.f });
@@ -668,6 +692,8 @@ int main()
 	ai::SkeletonPathState skeletonPathState;
 	float archerAnimationTime = 0.f;
 	int archerFacingRow = 0;
+	float ogreAnimationTime = 0.f;
+	int ogreFacingRow = 0;
 
 	while (window.isOpen())
 	{
@@ -889,6 +915,32 @@ int main()
 			}
 			std::cout << "Dungeon Ogre: " << actionName << '\n';
 		}
+		const bool ogrePathWasUnavailable = ogrePathState.pathFailed;
+		const sf::Vector2f ogreMovement = ai::followOgrePath(
+			ogreContext, ogrePathState, deltaTime, dungeon,
+			static_cast<float>(tileSize), ogreCellWalkable, ogreCanOccupy);
+		if (!ogrePathWasUnavailable && ogrePathState.pathFailed &&
+			ogreContext.currentAction == ai::EnemyContext::Action::Chase)
+			std::cerr << "Dungeon Ogre: no A* path to Player; holding position.\n";
+		const bool ogreIsWalking = ogreMovement.x != 0.f || ogreMovement.y != 0.f;
+		if (ogreIsWalking)
+		{
+			if (std::abs(ogreMovement.x) > std::abs(ogreMovement.y))
+				ogreFacingRow = ogreMovement.x > 0.f ? 3 : 2;
+			else
+				ogreFacingRow = ogreMovement.y > 0.f ? 0 : 1;
+		}
+		constexpr float ogreScale = 0.9f;
+		constexpr float ogreFootOffset = (244.f - playerFrameSize / 2.f) * ogreScale;
+		enemies[2].sprite.setPosition({ ogreContext.enemyPosition.x,
+			ogreContext.enemyPosition.y - ogreFootOffset });
+		ogreAnimationTime += deltaTime;
+		const float ogreFps = ogreIsWalking ? walkFramesPerSecond : idleFramesPerSecond;
+		const int ogreFrame = static_cast<int>(ogreAnimationTime * ogreFps) % animationFrameCount;
+		enemies[2].sprite.setTexture(ogreIsWalking ? ogreWalkTexture : enemies[2].texture);
+		enemies[2].sprite.setTextureRect(sf::IntRect(
+			{ ogreFrame * playerFrameSize, ogreFacingRow * playerFrameSize },
+			{ playerFrameSize, playerFrameSize }));
 
 		archerAnimationTime += deltaTime;
 		const float archerFps = archerIsWalking && !archerAttackUpdate.animationActive
