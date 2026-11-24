@@ -11,6 +11,7 @@
 #include "ai/SkeletonPathfinding.hpp"
 #include "ai/OgreDecision.hpp"
 #include "ai/OgrePathfinding.hpp"
+#include "ai/OgreCombat.hpp"
 
 #include <algorithm>
 #include <array>
@@ -322,6 +323,14 @@ int main()
 	}
 	ogreWalkTexture.setSmooth(false);
 
+	sf::Texture ogreAttackTexture;
+	if (!ogreAttackTexture.loadFromFile("Assets/characters/orc/orc_attack_sheet.png"))
+	{
+		std::cerr << "Could not load the Dungeon Ogre attack spritesheet.\n";
+		return 1;
+	}
+	ogreAttackTexture.setSmooth(false);
+
 	sf::Texture floorTexture;
 	if (!floorTexture.loadFromFile("Assets/tileset/floor_plain.png"))
 	{
@@ -571,6 +580,7 @@ int main()
 	ai::BehaviourTree ogreTree;
 	ai::buildOgreBehaviourTree(ogreTree);
 	ai::OgrePathState ogrePathState;
+	ai::OgreCombatState ogreCombatState;
 
 	sf::Font uiFont;
 	const bool uiFontLoaded = uiFont.openFromFile("C:/Windows/Fonts/arial.ttf");
@@ -903,6 +913,13 @@ int main()
 		ai::updateOgreVisibility(ogreContext);
 		const ai::EnemyContext::Action previousOgreAction = ogreContext.currentAction;
 		ogreTree.tick(ogreContext, deltaTime);
+		const ai::OgreCombatUpdate ogreAttackUpdate = ai::updateOgreCombat(
+			ogreCombatState, ogreContext, playerHealth, deltaTime);
+		if (ogreAttackUpdate.attackStarted)
+			ogreFacingRow = ai::ogreFacingRow(ogreContext.enemyPosition,
+				ogreContext.playerPosition);
+		if (ogreAttackUpdate.damageApplied)
+			std::cout << "Dungeon Ogre hit the Player for " << ai::ogreHeavyAttackDamage << " damage.\n";
 		if (ogreContext.currentAction != previousOgreAction)
 		{
 			const char* actionName = "Idle";
@@ -934,13 +951,23 @@ int main()
 		constexpr float ogreFootOffset = (244.f - playerFrameSize / 2.f) * ogreScale;
 		enemies[2].sprite.setPosition({ ogreContext.enemyPosition.x,
 			ogreContext.enemyPosition.y - ogreFootOffset });
-		ogreAnimationTime += deltaTime;
-		const float ogreFps = ogreIsWalking ? walkFramesPerSecond : idleFramesPerSecond;
-		const int ogreFrame = static_cast<int>(ogreAnimationTime * ogreFps) % animationFrameCount;
-		enemies[2].sprite.setTexture(ogreIsWalking ? ogreWalkTexture : enemies[2].texture);
-		enemies[2].sprite.setTextureRect(sf::IntRect(
-			{ ogreFrame * playerFrameSize, ogreFacingRow * playerFrameSize },
-			{ playerFrameSize, playerFrameSize }));
+		if (ogreAttackUpdate.animationActive)
+		{
+			enemies[2].sprite.setTexture(ogreAttackTexture);
+			enemies[2].sprite.setTextureRect(sf::IntRect(
+				{ ogreAttackUpdate.frame * playerFrameSize, ogreFacingRow * playerFrameSize },
+				{ playerFrameSize, playerFrameSize }));
+		}
+		else
+		{
+			ogreAnimationTime += deltaTime;
+			const float ogreFps = ogreIsWalking ? walkFramesPerSecond : idleFramesPerSecond;
+			const int ogreFrame = static_cast<int>(ogreAnimationTime * ogreFps) % animationFrameCount;
+			enemies[2].sprite.setTexture(ogreIsWalking ? ogreWalkTexture : enemies[2].texture);
+			enemies[2].sprite.setTextureRect(sf::IntRect(
+				{ ogreFrame * playerFrameSize, ogreFacingRow * playerFrameSize },
+				{ playerFrameSize, playerFrameSize }));
+		}
 
 		archerAnimationTime += deltaTime;
 		const float archerFps = archerIsWalking && !archerAttackUpdate.animationActive

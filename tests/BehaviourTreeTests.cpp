@@ -9,6 +9,7 @@
 #include "ai/LeafNodes.hpp"
 #include "ai/OgreDecision.hpp"
 #include "ai/OgrePathfinding.hpp"
+#include "ai/OgreCombat.hpp"
 #include "ai/SkeletonCombat.hpp"
 #include "ai/SkeletonDecision.hpp"
 #include "ai/SkeletonPathfinding.hpp"
@@ -813,6 +814,96 @@ namespace
                "Ogre stops and clears its route when HeavyAttack is selected");
     }
 
+    void testOgreCombat()
+    {
+        ai::PlayerHealth player;
+        ai::EnemyContext context{};
+        context.currentAction = ai::EnemyContext::Action::HeavyAttack;
+        context.enemyPosition = { 100.f, 100.f };
+        context.playerPosition = { 185.f, 100.f };
+        context.attackRange = 85.f;
+        context.hasLineOfSight = true;
+        ai::OgreCombatState state;
+
+        const ai::OgreCombatUpdate started = ai::updateOgreCombat(state,
+            context, player, 0.016f);
+        expect(started.attackStarted && started.animationActive &&
+               context.attackCycleActive && player.current == 100,
+               "Ogre starts a locked HeavyAttack animation without immediate damage");
+        ai::updateOgreCombat(state, context, player, 0.25f);
+        const ai::OgreCombatUpdate beforeImpact = ai::updateOgreCombat(
+            state, context, player, ai::ogreHeavyAttackWindup - 0.25f - 0.001f);
+        expect(beforeImpact.animationActive && !beforeImpact.damageApplied &&
+               player.current == 100,
+               "Ogre wind-up does not damage the Player before 0.5 seconds");
+        const ai::OgreCombatUpdate impact = ai::updateOgreCombat(
+            state, context, player, 0.001f);
+        expect(impact.damageApplied && impact.frame == ai::ogreAttackImpactFrame &&
+               player.current == 80,
+               "Ogre applies 20 damage once at the 0.5-second impact frame");
+        const ai::OgreCombatUpdate afterImpact = ai::updateOgreCombat(
+            state, context, player, 0.1f);
+        expect(!afterImpact.damageApplied && player.current == 80,
+               "One Ogre attack cycle cannot damage the Player twice");
+        ai::updateOgreCombat(state, context, player,
+            ai::ogreAttackAnimationDuration - state.elapsed);
+        expect(context.currentAction == ai::EnemyContext::Action::Recovery &&
+               state.phase == ai::OgreCombatState::Phase::Recovery &&
+               context.attackCycleActive,
+               "Ogre enters a locked Recovery after the attack animation");
+
+        ai::BehaviourTree tree;
+        ai::buildOgreBehaviourTree(tree);
+        const ai::NodeStatus lockedStatus = tree.tick(context, 0.016f);
+        expect(lockedStatus == ai::NodeStatus::Running &&
+               context.currentAction == ai::EnemyContext::Action::Recovery,
+               "Ogre Behaviour Tree keeps Recovery ahead of a new HeavyAttack");
+
+        const ai::OgreCombatUpdate recovery = ai::updateOgreCombat(
+            state, context, player, ai::ogreRecoveryDuration - 0.01f);
+        expect(!recovery.animationActive && context.attackCycleActive &&
+               context.currentAction == ai::EnemyContext::Action::Recovery,
+               "Ogre remains stationary in Recovery for the full 1.5 seconds");
+        ai::updateOgreCombat(state, context, player, 0.02f);
+        expect(!context.attackCycleActive && state.phase == ai::OgreCombatState::Phase::None,
+               "Ogre releases its attack lock after the Recovery timer ends");
+
+        context.playerPosition = { 300.f, 100.f };
+        context.hasLineOfSight = true;
+        ai::updateOgreVisibility(context);
+        tree.tick(context, 0.016f);
+        expect(context.currentAction == ai::EnemyContext::Action::Chase,
+               "Ogre Behaviour Tree resumes Chase after Recovery completes");
+
+        const auto runMiss = [](float playerDistance, bool clearShot)
+        {
+            ai::PlayerHealth target;
+            ai::EnemyContext attackContext{};
+            attackContext.currentAction = ai::EnemyContext::Action::HeavyAttack;
+            attackContext.enemyPosition = { 100.f, 100.f };
+            attackContext.playerPosition = { 100.f + playerDistance, 100.f };
+            attackContext.attackRange = 85.f;
+            attackContext.hasLineOfSight = clearShot;
+            ai::OgreCombatState attackState;
+            ai::updateOgreCombat(attackState, attackContext, target, 0.016f);
+            const ai::OgreCombatUpdate hitFrame = ai::updateOgreCombat(
+                attackState, attackContext, target, ai::ogreHeavyAttackWindup);
+            return std::pair<int, bool>{ target.current, hitFrame.damageApplied };
+        };
+        const auto escaped = runMiss(86.f, true);
+        expect(escaped.first == 100 && !escaped.second,
+               "Ogre misses when the Player leaves the 85-unit range before impact");
+        const auto blocked = runMiss(80.f, false);
+        expect(blocked.first == 100 && !blocked.second,
+               "Ogre heavy attack cannot hit the Player through a blocking wall");
+
+        expect(ai::ogreFacingRow({ 100.f, 100.f }, { 100.f, 200.f }) == 0 &&
+               ai::ogreFacingRow({ 100.f, 200.f }, { 100.f, 100.f }) == 1 &&
+               ai::ogreFacingRow({ 100.f, 100.f }, { 50.f, 100.f }) == 2 &&
+               ai::ogreFacingRow({ 100.f, 100.f }, { 150.f, 100.f }) == 3,
+               "Ogre attack facing maps to the four Orc spritesheet direction rows");
+    }
+
     void testSkeletonMovement()
     {
         ai::BehaviourTree tree;
@@ -1132,6 +1223,7 @@ int main()
     testArcherCombat();
     testOgreDecision();
     testOgrePathfinding();
+    testOgreCombat();
     testSkeletonMovement();
     testAStarPathfinding();
     testCentralPassageNavigation();
