@@ -1051,11 +1051,13 @@ namespace
             ai::EnemyHealth{ 45 }, ai::EnemyHealth{ 35 }, ai::EnemyHealth{ 100 }
         };
 
-        session.update(player);
+        session.update(player, enemies);
         expect(!session.gameOver,
                "Game Over stays inactive while the Player has health");
+        expect(!session.victory,
+               "Victory stays inactive while any enemy remains undefeated");
         player.takeDamage(ai::PlayerHealth::maximum);
-        session.update(player);
+        session.update(player, enemies);
         expect(session.gameOver && !session.canRestart(false) && session.canRestart(true),
                "Game Over activates at zero Player HP and accepts an R restart request");
 
@@ -1071,6 +1073,36 @@ namespace
         expect(ai::shouldRenderEnemy(enemies[0]) && ai::shouldRenderEnemy(enemies[1]) &&
                ai::shouldRenderEnemy(enemies[2]),
                "Restart reactivates all enemies for gameplay and rendering");
+
+        enemies[0].takeDamage(45);
+        enemies[1].takeDamage(35);
+        session.update(player, enemies);
+        expect(!session.victory,
+               "Defeating only some enemies does not trigger Victory");
+        enemies[2].takeDamage(100);
+        session.update(player, enemies);
+        expect(session.victory && !session.gameOver && session.isPaused() &&
+               !session.canRestart(false) && session.canRestart(true),
+               "Defeating all enemies triggers Victory and pauses gameplay");
+
+        // A terminal state does not change if update is called again.
+        const int frozenPlayerHealth = player.current;
+        session.update(player, enemies);
+        expect(session.victory && player.current == frozenPlayerHealth,
+               "Victory remains active while gameplay state is frozen");
+
+        session.restart(player, enemies);
+        expect(!session.victory && !session.gameOver && player.current == 100 &&
+               enemies[0].current == 45 && enemies[1].current == 35 &&
+               enemies[2].current == 100,
+               "Restart from Victory resets Player and enemy health");
+
+        for (ai::EnemyHealth& enemy : enemies)
+            enemy.takeDamage(enemy.maximum);
+        player.takeDamage(ai::PlayerHealth::maximum);
+        session.update(player, enemies);
+        expect(session.gameOver && !session.victory,
+               "Game Over takes priority if Player and final enemy are defeated together");
     }
 
     void testSkeletonMovement()

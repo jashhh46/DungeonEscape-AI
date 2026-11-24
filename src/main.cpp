@@ -720,6 +720,9 @@ int main()
 	sf::Text gameOverTitle(uiFont, "GAME OVER", 64);
 	gameOverTitle.setFillColor(sf::Color(235, 80, 70));
 	gameOverTitle.setPosition({ 350.f, 315.f });
+	sf::Text victoryTitle(uiFont, "DUNGEON CLEARED!", 58);
+	victoryTitle.setFillColor(sf::Color(235, 210, 120));
+	victoryTitle.setPosition({ 275.f, 315.f });
 	sf::Text restartPrompt(uiFont, "Press R to Restart", 28);
 	restartPrompt.setFillColor(sf::Color::White);
 	restartPrompt.setPosition({ 365.f, 405.f });
@@ -815,9 +818,9 @@ int main()
 				window.close();
 			if (const auto* keyPressed = event->getIf<sf::Event::KeyPressed>())
 			{
-				if (gameSession.gameOver && keyPressed->code == sf::Keyboard::Key::R)
+				if (gameSession.isPaused() && keyPressed->code == sf::Keyboard::Key::R)
 					restartPressed = true;
-				if (!gameSession.gameOver && keyPressed->code == sf::Keyboard::Key::Space &&
+				if (!gameSession.isPaused() && keyPressed->code == sf::Keyboard::Key::Space &&
 					playerHealth.current > 0)
 					ai::pressPlayerAttack(playerAttackState, facingRow);
 			}
@@ -829,7 +832,7 @@ int main()
 		}
 		if (!window.isOpen())
 			break;
-		if (gameSession.gameOver)
+		if (gameSession.isPaused())
 		{
 			if (gameSession.canRestart(restartPressed))
 			{
@@ -842,7 +845,7 @@ int main()
 			window.clear(sf::Color(12, 12, 20));
 			if (uiFontLoaded)
 			{
-				window.draw(gameOverTitle);
+				window.draw(gameSession.gameOver ? gameOverTitle : victoryTitle);
 				window.draw(restartPrompt);
 			}
 			window.display();
@@ -1225,7 +1228,7 @@ int main()
 				{ frame * playerFrameSize, facingRow * playerFrameSize },
 				{ playerFrameSize, playerFrameSize }));
 		}
-		gameSession.update(playerHealth);
+		gameSession.update(playerHealth, enemyHealth);
 
 		const sf::Vector2f viewSize = camera.getSize();
 		sf::Vector2f cameraCenter = player.getPosition();
@@ -1324,7 +1327,7 @@ int main()
 			healthLabel.setString("Player HP: " + std::to_string(playerHealth.current) + " / 100");
 			window.draw(healthLabel);
 		}
-		if (gameSession.gameOver)
+		if (gameSession.isPaused())
 		{
 			sf::RectangleShape defeatOverlay({ static_cast<float>(windowWidth),
 				static_cast<float>(windowHeight) });
@@ -1332,7 +1335,7 @@ int main()
 			window.draw(defeatOverlay);
 			if (uiFontLoaded)
 			{
-				window.draw(gameOverTitle);
+				window.draw(gameSession.gameOver ? gameOverTitle : victoryTitle);
 				window.draw(restartPrompt);
 			}
 		}
