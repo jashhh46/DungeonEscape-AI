@@ -13,6 +13,7 @@
 #include "ai/PlayerAttack.hpp"
 #include "ai/PlayerCombat.hpp"
 #include "ai/EnemyHealth.hpp"
+#include "ai/GameSession.hpp"
 #include "ai/SkeletonCombat.hpp"
 #include "ai/SkeletonDecision.hpp"
 #include "ai/SkeletonPathfinding.hpp"
@@ -1042,6 +1043,36 @@ namespace
                "Defeated enemy cannot receive more Player attack damage");
     }
 
+    void testGameOverAndRestart()
+    {
+        ai::GameSessionState session;
+        ai::PlayerHealth player;
+        std::array<ai::EnemyHealth, 3> enemies{
+            ai::EnemyHealth{ 45 }, ai::EnemyHealth{ 35 }, ai::EnemyHealth{ 100 }
+        };
+
+        session.update(player);
+        expect(!session.gameOver,
+               "Game Over stays inactive while the Player has health");
+        player.takeDamage(ai::PlayerHealth::maximum);
+        session.update(player);
+        expect(session.gameOver && !session.canRestart(false) && session.canRestart(true),
+               "Game Over activates at zero Player HP and accepts an R restart request");
+
+        enemies[0].takeDamage(45);
+        enemies[1].takeDamage(35);
+        enemies[2].takeDamage(100);
+        session.restart(player, enemies);
+        expect(!session.gameOver && !session.canRestart(true),
+               "Restart clears the Game Over state");
+        expect(player.current == 100 && enemies[0].current == 45 &&
+               enemies[1].current == 35 && enemies[2].current == 100,
+               "Restart restores Player and all enemy health values");
+        expect(ai::shouldRenderEnemy(enemies[0]) && ai::shouldRenderEnemy(enemies[1]) &&
+               ai::shouldRenderEnemy(enemies[2]),
+               "Restart reactivates all enemies for gameplay and rendering");
+    }
+
     void testSkeletonMovement()
     {
         ai::BehaviourTree tree;
@@ -1365,6 +1396,7 @@ int main()
     testPlayerAttack();
     testPlayerCombat();
     testDefeatedEnemyRenderingAndInteraction();
+    testGameOverAndRestart();
     testSkeletonMovement();
     testAStarPathfinding();
     testCentralPassageNavigation();

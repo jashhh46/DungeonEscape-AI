@@ -15,6 +15,7 @@
 #include "ai/PlayerAttack.hpp"
 #include "ai/EnemyHealth.hpp"
 #include "ai/PlayerCombat.hpp"
+#include "ai/GameSession.hpp"
 
 #include <algorithm>
 #include <array>
@@ -574,6 +575,7 @@ int main()
 	ai::buildSkeletonBehaviourTree(skeletonTree);
 	ai::SkeletonAttackState skeletonAttack;
 	ai::PlayerHealth playerHealth;
+	ai::GameSessionState gameSession;
 	std::array<ai::EnemyHealth, enemySpawns.size()> enemyHealth{
 		ai::EnemyHealth{ 45 }, ai::EnemyHealth{ 35 }, ai::EnemyHealth{ 100 }
 	};
@@ -715,12 +717,12 @@ int main()
 		enemyHealthBars[i].setSize({ 64.f, 7.f });
 		enemyHealthBars[i].setFillColor(sf::Color(210, 55, 50));
 	}
-	sf::Text defeatTitle(uiFont, "DEFEAT", 64);
-	defeatTitle.setFillColor(sf::Color(235, 80, 70));
-	defeatTitle.setPosition({ 400.f, 330.f });
-	sf::Text defeatSubtitle(uiFont, "Player has fallen", 28);
-	defeatSubtitle.setFillColor(sf::Color::White);
-	defeatSubtitle.setPosition({ 405.f, 410.f });
+	sf::Text gameOverTitle(uiFont, "GAME OVER", 64);
+	gameOverTitle.setFillColor(sf::Color(235, 80, 70));
+	gameOverTitle.setPosition({ 350.f, 315.f });
+	sf::Text restartPrompt(uiFont, "Press R to Restart", 28);
+	restartPrompt.setFillColor(sf::Color::White);
+	restartPrompt.setPosition({ 365.f, 405.f });
 	bool defeatReported = false;
 
 	sf::Clock deltaClock;
@@ -733,16 +735,90 @@ int main()
 	int archerFacingRow = 0;
 	float ogreAnimationTime = 0.f;
 	int ogreFacingRow = 0;
+	const auto resetGameSession = [&]
+	{
+		gameSession.restart(playerHealth, enemyHealth);
+		player.setPosition(playerStartPosition);
+		player.setTexture(playerIdleTexture);
+		player.setTextureRect(sf::IntRect({ 0, 0 }, { playerFrameSize, playerFrameSize }));
+		playerAttackState = {};
+		animationTime = 0.f;
+		facingRow = 0;
+
+		for (std::size_t i = 0; i < enemies.size(); ++i)
+		{
+			enemies[i].sprite.setTexture(enemies[i].texture);
+			enemies[i].sprite.setTextureRect(sf::IntRect(
+				{ 0, 0 }, { playerFrameSize, playerFrameSize }));
+			enemies[i].sprite.setPosition(cellCenter(enemySpawns[i].cell));
+			enemies[i].sprite.setScale({ enemySpawns[i].scale, enemySpawns[i].scale });
+		}
+
+		skeletonContext = {};
+		skeletonContext.detectionRange = 375.f;
+		skeletonContext.attackRange = 60.f;
+		skeletonContext.attackRangeBuffer = 10.f;
+		skeletonContext.moveSpeed = 100.f;
+		skeletonContext.enemyPosition = enemies[0].sprite.getTransform().transformPoint(
+			{ playerFrameSize / 2.f, 244.f });
+		skeletonContext.playerPosition = playerStartGround;
+		ai::buildSkeletonBehaviourTree(skeletonTree);
+		skeletonAttack = {};
+		skeletonPathState = {};
+		skeletonAnimationTime = 0.f;
+		skeletonFacingRow = 0;
+
+		archerContext = {};
+		archerContext.detectionRange = 600.f;
+		archerContext.moveSpeed = 120.f;
+		archerContext.enemyPosition = enemies[1].sprite.getTransform().transformPoint(
+			{ playerFrameSize / 2.f, 244.f });
+		archerContext.playerPosition = playerStartGround;
+		ai::buildArcherBehaviourTree(archerTree);
+		archerPathState = {};
+		archerAttackState = {};
+		archerProjectiles.clear();
+		archerAnimationTime = 0.f;
+		archerFacingRow = 0;
+
+		ogreContext = {};
+		ogreContext.detectionRange = 450.f;
+		ogreContext.attackRange = 85.f;
+		ogreContext.moveSpeed = 65.f;
+		ogreContext.enemyPosition = enemies[2].sprite.getTransform().transformPoint(
+			{ playerFrameSize / 2.f, 244.f });
+		ogreContext.playerPosition = playerStartGround;
+		ai::buildOgreBehaviourTree(ogreTree);
+		ogrePathState = {};
+		ogreCombatState = {};
+		ogreAnimationTime = 0.f;
+		ogreFacingRow = 0;
+
+		defeatReported = false;
+		sf::Vector2f cameraCenter = playerStartPosition;
+		const sf::Vector2f viewSize = camera.getSize();
+		cameraCenter.x = std::clamp(cameraCenter.x, viewSize.x / 2.f,
+			dungeonWorldWidth - viewSize.x / 2.f);
+		cameraCenter.y = std::clamp(cameraCenter.y, viewSize.y / 2.f,
+			dungeonWorldHeight - viewSize.y / 2.f);
+		camera.setCenter(cameraCenter);
+		window.setView(camera);
+		deltaClock.restart();
+	};
 
 	while (window.isOpen())
 	{
+		bool restartPressed = false;
 		while (const std::optional event = window.pollEvent())
 		{
 			if (event->is<sf::Event::Closed>())
 				window.close();
 			if (const auto* keyPressed = event->getIf<sf::Event::KeyPressed>())
 			{
-				if (keyPressed->code == sf::Keyboard::Key::Space && playerHealth.current > 0)
+				if (gameSession.gameOver && keyPressed->code == sf::Keyboard::Key::R)
+					restartPressed = true;
+				if (!gameSession.gameOver && keyPressed->code == sf::Keyboard::Key::Space &&
+					playerHealth.current > 0)
 					ai::pressPlayerAttack(playerAttackState, facingRow);
 			}
 			if (const auto* keyReleased = event->getIf<sf::Event::KeyReleased>())
@@ -753,6 +829,25 @@ int main()
 		}
 		if (!window.isOpen())
 			break;
+		if (gameSession.gameOver)
+		{
+			if (gameSession.canRestart(restartPressed))
+			{
+				resetGameSession();
+				continue;
+			}
+
+			deltaClock.restart();
+			window.setView(window.getDefaultView());
+			window.clear(sf::Color(12, 12, 20));
+			if (uiFontLoaded)
+			{
+				window.draw(gameOverTitle);
+				window.draw(restartPrompt);
+			}
+			window.display();
+			continue;
+		}
 
 		const float deltaTime = std::min(deltaClock.restart().asSeconds(), 0.1f);
 		sf::Vector2f direction{};
@@ -990,7 +1085,7 @@ int main()
 		ai::updateOgreVisibility(ogreContext);
 		const ai::EnemyContext::Action previousOgreAction = ogreContext.currentAction;
 		ai::OgreCombatUpdate ogreAttackUpdate{};
-		if (!enemyHealth[2].isDefeated())
+		if (playerHealth.current > 0 && !enemyHealth[2].isDefeated())
 		{
 			ogreTree.tick(ogreContext, deltaTime);
 			ogreAttackUpdate = ai::updateOgreCombat(
@@ -1130,6 +1225,7 @@ int main()
 				{ frame * playerFrameSize, facingRow * playerFrameSize },
 				{ playerFrameSize, playerFrameSize }));
 		}
+		gameSession.update(playerHealth);
 
 		const sf::Vector2f viewSize = camera.getSize();
 		sf::Vector2f cameraCenter = player.getPosition();
@@ -1228,7 +1324,7 @@ int main()
 			healthLabel.setString("Player HP: " + std::to_string(playerHealth.current) + " / 100");
 			window.draw(healthLabel);
 		}
-		if (playerHealth.current == 0)
+		if (gameSession.gameOver)
 		{
 			sf::RectangleShape defeatOverlay({ static_cast<float>(windowWidth),
 				static_cast<float>(windowHeight) });
@@ -1236,8 +1332,8 @@ int main()
 			window.draw(defeatOverlay);
 			if (uiFontLoaded)
 			{
-				window.draw(defeatTitle);
-				window.draw(defeatSubtitle);
+				window.draw(gameOverTitle);
+				window.draw(restartPrompt);
 			}
 		}
 		window.display();
