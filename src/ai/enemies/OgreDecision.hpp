@@ -1,9 +1,9 @@
 #pragma once
 
-#include "BehaviourTree.hpp"
-#include "CompositeNodes.hpp"
-#include "EnemyContext.hpp"
-#include "LeafNodes.hpp"
+#include "../behaviour_tree/BehaviourTree.hpp"
+#include "../behaviour_tree/CompositeNodes.hpp"
+#include "../behaviour_tree/EnemyContext.hpp"
+#include "../behaviour_tree/LeafNodes.hpp"
 
 #include <cmath>
 #include <memory>

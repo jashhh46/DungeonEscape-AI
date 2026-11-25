@@ -1,6 +1,6 @@
 #pragma once
 
-#include "EnemyHealth.hpp"
+#include "../game/EnemyHealth.hpp"
 #include "PlayerAttack.hpp"
 
 #include <SFML/System/Vector2.hpp>

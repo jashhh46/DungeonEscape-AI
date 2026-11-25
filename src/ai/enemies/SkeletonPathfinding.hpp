@@ -1,7 +1,7 @@
 #pragma once
 
-#include "AStarPathfinder.hpp"
-#include "EnemyContext.hpp"
+#include "../navigation/AStarPathfinder.hpp"
+#include "../behaviour_tree/EnemyContext.hpp"
 
 #include <algorithm>
 #include <cmath>

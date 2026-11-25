@@ -1,6 +1,6 @@
 #pragma once
 
-#include "EnemyContext.hpp"
+#include "../behaviour_tree/EnemyContext.hpp"
 #include "SkeletonCombat.hpp"
 
 #include <algorithm>

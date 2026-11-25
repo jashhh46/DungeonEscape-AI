@@ -1,8 +1,8 @@
 #pragma once
 
-#include "AStarPathfinder.hpp"
-#include "EnemyContext.hpp"
-#include "GridCollision.hpp"
+#include "../navigation/AStarPathfinder.hpp"
+#include "../behaviour_tree/EnemyContext.hpp"
+#include "../navigation/GridCollision.hpp"
 #include "SkeletonPathfinding.hpp"
 
 #include <algorithm>

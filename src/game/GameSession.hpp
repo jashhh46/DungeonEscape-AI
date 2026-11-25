@@ -1,7 +1,7 @@
 #pragma once
 
 #include "EnemyHealth.hpp"
-#include "SkeletonCombat.hpp"
+#include "../ai/enemies/SkeletonCombat.hpp"
 
 #include <array>
 #include <algorithm>
