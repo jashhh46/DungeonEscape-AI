@@ -16,10 +16,13 @@
 #include "game/EnemyHealth.hpp"
 #include "player/PlayerCombat.hpp"
 #include "game/GameSession.hpp"
+#include "evaluation/EvaluationLogger.hpp"
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <iostream>
 #include <random>
 #include <string>
@@ -576,6 +579,8 @@ int main()
 	ai::SkeletonAttackState skeletonAttack;
 	ai::PlayerHealth playerHealth;
 	ai::GameSessionState gameSession;
+	evaluation::EvaluationLogger evaluationLogger;
+	double evaluationTimeSeconds = 0.0;
 	std::array<ai::EnemyHealth, enemySpawns.size()> enemyHealth{
 		ai::EnemyHealth{ 45 }, ai::EnemyHealth{ 35 }, ai::EnemyHealth{ 100 }
 	};
@@ -740,6 +745,8 @@ int main()
 	int ogreFacingRow = 0;
 	const auto resetGameSession = [&]
 	{
+		evaluationLogger.startNewTrial(evaluationTimeSeconds);
+		evaluationTimeSeconds = 0.0;
 		gameSession.restart(playerHealth, enemyHealth);
 		player.setPosition(playerStartPosition);
 		player.setTexture(playerIdleTexture);
@@ -853,6 +860,7 @@ int main()
 		}
 
 		const float deltaTime = std::min(deltaClock.restart().asSeconds(), 0.1f);
+		evaluationTimeSeconds += deltaTime;
 		sf::Vector2f direction{};
 		if (playerHealth.current > 0 && !playerAttackState.animationActive &&
 			sf::Keyboard::isKeyPressed(sf::Keyboard::Key::W))
@@ -932,7 +940,14 @@ int main()
 			skeletonContext.enemyPosition, skeletonContext.playerPosition, skeletonCanOccupy, 12.f);
 		const ai::EnemyContext::Action previousSkeletonAction = skeletonContext.currentAction;
 		if (playerHealth.current > 0 && !enemyHealth[0].isDefeated())
+		{
+			const auto tickStart = std::chrono::steady_clock::now();
 			skeletonTree.tick(skeletonContext, deltaTime);
+			const auto tickDuration = std::chrono::duration_cast<std::chrono::microseconds>(
+				std::chrono::steady_clock::now() - tickStart).count();
+			evaluationLogger.recordBehaviourTreeTick(evaluationTimeSeconds,
+				"Skeleton Guard", static_cast<std::uint64_t>(tickDuration));
+		}
 		else
 		{
 			skeletonContext.currentAction = ai::EnemyContext::Action::Idle;
@@ -948,12 +963,27 @@ int main()
 				actionName = "Chase";
 			std::cout << "Skeleton Guard: " << actionName << '\n';
 		}
+		if (playerHealth.current > 0 && !enemyHealth[0].isDefeated())
+			evaluationLogger.recordAction(evaluationTimeSeconds, "Skeleton Guard",
+				skeletonContext.currentAction == ai::EnemyContext::Action::Attack ? "Attack" :
+				skeletonContext.currentAction == ai::EnemyContext::Action::Chase ? "Chase" : "Idle",
+				ai::distanceBetween(skeletonContext.enemyPosition, skeletonContext.playerPosition),
+				skeletonContext.hasLineOfSight);
+		evaluationLogger.recordDetection(evaluationTimeSeconds, "Skeleton Guard",
+			skeletonContext.playerVisible,
+			ai::distanceBetween(skeletonContext.enemyPosition, skeletonContext.playerPosition),
+			skeletonContext.hasLineOfSight);
 
 		const bool pathWasUnavailable = skeletonPathState.pathFailed;
 		const sf::Vector2f skeletonMovement = ai::followSkeletonPath(
 			skeletonContext, skeletonPathState, deltaTime, dungeon,
 			static_cast<float>(tileSize), skeletonCellWalkable, skeletonCanOccupy,
-			skeletonNavigationGroundOffset);
+			skeletonNavigationGroundOffset,
+			[&](bool success, std::uint64_t durationMicroseconds)
+			{
+				evaluationLogger.recordAStar(evaluationTimeSeconds, "Skeleton Guard",
+					success, durationMicroseconds);
+			});
 		if (!pathWasUnavailable && skeletonPathState.pathFailed &&
 			skeletonContext.currentAction == ai::EnemyContext::Action::Chase)
 			std::cerr << "Skeleton Guard: no A* path to Player; holding position.\n";
@@ -962,6 +992,8 @@ int main()
 			skeletonContext.enemyPosition, skeletonContext.playerPosition, skeletonCanOccupy, 12.f);
 		const float distanceToPlayer = ai::distanceBetween(
 			skeletonContext.enemyPosition, skeletonContext.playerPosition);
+		const bool skeletonAttackWasActive = skeletonAttack.animationActive;
+		const bool skeletonHitWasApplied = skeletonAttack.hitApplied;
 		const ai::SkeletonAttackUpdate attackUpdate = ai::updateSkeletonAttack(
 			skeletonAttack, playerHealth,
 			skeletonContext.currentAction == ai::EnemyContext::Action::Attack,
@@ -969,7 +1001,21 @@ int main()
 			skeletonContext.hasLineOfSight, deltaTime);
 		skeletonContext.attackCycleActive = attackUpdate.animationActive;
 		if (attackUpdate.damageApplied)
+		{
+			evaluationLogger.recordCombat(evaluationTimeSeconds, "Skeleton Guard", "hit",
+				distanceToPlayer, skeletonContext.hasLineOfSight);
 			std::cout << "Player hit by Skeleton Guard: " << playerHealth.current << " HP remaining.\n";
+		}
+		if (!skeletonAttackWasActive && attackUpdate.animationActive)
+			evaluationLogger.recordCombat(evaluationTimeSeconds, "Skeleton Guard", "attack_attempt",
+				distanceToPlayer, skeletonContext.hasLineOfSight);
+		if (!skeletonHitWasApplied && skeletonAttack.hitApplied && !attackUpdate.damageApplied)
+			evaluationLogger.recordCombat(evaluationTimeSeconds, "Skeleton Guard", "miss",
+				distanceToPlayer, skeletonContext.hasLineOfSight);
+		if (skeletonAttackWasActive && !attackUpdate.animationActive &&
+			!skeletonHitWasApplied && !skeletonAttack.hitApplied)
+			evaluationLogger.recordCombat(evaluationTimeSeconds, "Skeleton Guard", "miss",
+				distanceToPlayer, skeletonContext.hasLineOfSight);
 		if (playerHealth.current == 0 && !defeatReported)
 		{
 			std::cout << "Player defeated.\n";
@@ -986,7 +1032,14 @@ int main()
 		ai::updateArcherVisibility(archerContext);
 		const ai::EnemyContext::Action previousArcherAction = archerContext.currentAction;
 		if (playerHealth.current > 0 && !enemyHealth[1].isDefeated())
+		{
+			const auto tickStart = std::chrono::steady_clock::now();
 			archerTree.tick(archerContext, deltaTime);
+			const auto tickDuration = std::chrono::duration_cast<std::chrono::microseconds>(
+				std::chrono::steady_clock::now() - tickStart).count();
+			evaluationLogger.recordBehaviourTreeTick(evaluationTimeSeconds,
+				"Goblin Archer", static_cast<std::uint64_t>(tickDuration));
+		}
 		else
 		{
 			archerContext.currentAction = ai::EnemyContext::Action::Idle;
@@ -1006,6 +1059,22 @@ int main()
 			}
 			std::cout << "Goblin Archer: " << actionName << '\n';
 		}
+		const char* archerActionName = "Idle";
+		switch (archerContext.currentAction)
+		{
+		case ai::EnemyContext::Action::Retreat:      archerActionName = "Retreat"; break;
+		case ai::EnemyContext::Action::RangedAttack: archerActionName = "RangedAttack"; break;
+		case ai::EnemyContext::Action::Approach:     archerActionName = "Approach"; break;
+		case ai::EnemyContext::Action::Reposition:   archerActionName = "Reposition"; break;
+		default: break;
+		}
+		if (playerHealth.current > 0 && !enemyHealth[1].isDefeated())
+			evaluationLogger.recordAction(evaluationTimeSeconds, "Goblin Archer",
+				archerActionName,
+				ai::archerDistance(archerContext), archerContext.hasLineOfSight);
+		evaluationLogger.recordDetection(evaluationTimeSeconds, "Goblin Archer",
+			archerContext.playerVisible, ai::archerDistance(archerContext),
+			archerContext.hasLineOfSight);
 		const bool archerPathWasUnavailable = archerPathState.pathFailed;
 		const sf::Vector2f archerMovement = ai::moveArcher(
 			archerContext, archerPathState, deltaTime, dungeon,
@@ -1013,6 +1082,11 @@ int main()
 			[&](const sf::Vector2f& from, const sf::Vector2f& to)
 			{
 				return ai::hasClearLineOfSight(from, to, archerRayCanOccupy, 12.f);
+			},
+			[&](bool success, std::uint64_t durationMicroseconds)
+			{
+				evaluationLogger.recordAStar(evaluationTimeSeconds, "Goblin Archer",
+					success, durationMicroseconds);
 			});
 		if (!archerPathWasUnavailable && archerPathState.pathFailed &&
 			(archerContext.currentAction == ai::EnemyContext::Action::Retreat ||
@@ -1049,8 +1123,19 @@ int main()
 				deltaTime, playerGroundPosition, playerColliderWidth, playerColliderHeight,
 				playerHealth, arrowCanOccupy);
 		if (archerHits > 0)
+		{
+			for (int hit = 0; hit < archerHits; ++hit)
+				evaluationLogger.recordCombat(evaluationTimeSeconds, "Goblin Archer", "hit",
+					ai::archerDistance(archerContext), archerContext.hasLineOfSight);
 			std::cout << "Player hit by Goblin Archer: " << playerHealth.current
 				<< " HP remaining.\n";
+		}
+		for (const ai::ArcherProjectile& projectile : archerProjectiles)
+		{
+			if (!projectile.active && !projectile.hitPlayer)
+				evaluationLogger.recordCombat(evaluationTimeSeconds, "Goblin Archer", "miss",
+					ai::archerDistance(archerContext), archerContext.hasLineOfSight);
+		}
 		archerProjectiles.erase(std::remove_if(archerProjectiles.begin(), archerProjectiles.end(),
 			[](const ai::ArcherProjectile& projectile) { return !projectile.active; }),
 			archerProjectiles.end());
@@ -1069,8 +1154,14 @@ int main()
 				const sf::Vector2f aim = toPlayer / distance;
 				const sf::Vector2f bowOrigin = archerContext.enemyPosition +
 					sf::Vector2f{ 0.f, -48.f } + aim * 28.f;
-				archerProjectiles.push_back(ai::makeArcherProjectile(
-					bowOrigin, archerContext.playerPosition));
+				const ai::ArcherProjectile projectile = ai::makeArcherProjectile(
+					bowOrigin, archerContext.playerPosition);
+				if (projectile.active)
+				{
+					archerProjectiles.push_back(projectile);
+					evaluationLogger.recordCombat(evaluationTimeSeconds, "Goblin Archer",
+						"attack_attempt", distance, archerContext.hasLineOfSight);
+				}
 			}
 		}
 		if (playerHealth.current == 0 && !defeatReported)
@@ -1090,9 +1181,22 @@ int main()
 		ai::OgreCombatUpdate ogreAttackUpdate{};
 		if (playerHealth.current > 0 && !enemyHealth[2].isDefeated())
 		{
+			const auto tickStart = std::chrono::steady_clock::now();
 			ogreTree.tick(ogreContext, deltaTime);
+			const auto tickDuration = std::chrono::duration_cast<std::chrono::microseconds>(
+				std::chrono::steady_clock::now() - tickStart).count();
+			evaluationLogger.recordBehaviourTreeTick(evaluationTimeSeconds,
+				"Dungeon Ogre", static_cast<std::uint64_t>(tickDuration));
+			const bool ogreHitWasApplied = ogreCombatState.hitApplied;
 			ogreAttackUpdate = ai::updateOgreCombat(
 				ogreCombatState, ogreContext, playerHealth, deltaTime);
+			if (ogreAttackUpdate.attackStarted)
+				evaluationLogger.recordCombat(evaluationTimeSeconds, "Dungeon Ogre",
+					"attack_attempt", ai::ogreDistance(ogreContext), ogreContext.hasLineOfSight);
+			if (!ogreHitWasApplied && ogreCombatState.hitApplied)
+				evaluationLogger.recordCombat(evaluationTimeSeconds, "Dungeon Ogre",
+					ogreAttackUpdate.damageApplied ? "hit" : "miss",
+					ai::ogreDistance(ogreContext), ogreContext.hasLineOfSight);
 		}
 		else
 		{
@@ -1119,10 +1223,34 @@ int main()
 			}
 			std::cout << "Dungeon Ogre: " << actionName << '\n';
 		}
+		const char* ogreActionName = "Idle";
+		switch (ogreContext.currentAction)
+		{
+		case ai::EnemyContext::Action::Chase:       ogreActionName = "Chase"; break;
+		case ai::EnemyContext::Action::HeavyAttack: ogreActionName = "HeavyAttack"; break;
+		case ai::EnemyContext::Action::Recovery:    ogreActionName = "Recovery"; break;
+		default: break;
+		}
+		if (playerHealth.current > 0 && !enemyHealth[2].isDefeated())
+			evaluationLogger.recordAction(evaluationTimeSeconds, "Dungeon Ogre",
+				ogreActionName, ai::ogreDistance(ogreContext), ogreContext.hasLineOfSight);
+		evaluationLogger.recordDetection(evaluationTimeSeconds, "Dungeon Ogre",
+			ogreContext.playerVisible, ai::ogreDistance(ogreContext),
+			ogreContext.hasLineOfSight);
+		if (ogreContext.currentAction == ai::EnemyContext::Action::Recovery &&
+			previousOgreAction != ai::EnemyContext::Action::Recovery)
+			evaluationLogger.recordCombat(evaluationTimeSeconds, "Dungeon Ogre",
+				"recovery_started", ai::ogreDistance(ogreContext), ogreContext.hasLineOfSight);
 		const bool ogrePathWasUnavailable = ogrePathState.pathFailed;
 		const sf::Vector2f ogreMovement = ai::followOgrePath(
 			ogreContext, ogrePathState, deltaTime, dungeon,
-			static_cast<float>(tileSize), ogreCellWalkable, ogreCanOccupy);
+			static_cast<float>(tileSize), ogreCellWalkable, ogreCanOccupy,
+			ai::ogreNavigationGroundOffset,
+			[&](bool success, std::uint64_t durationMicroseconds)
+			{
+				evaluationLogger.recordAStar(evaluationTimeSeconds, "Dungeon Ogre",
+					success, durationMicroseconds);
+			});
 		if (!ogrePathWasUnavailable && ogrePathState.pathFailed &&
 			ogreContext.currentAction == ai::EnemyContext::Action::Chase)
 			std::cerr << "Dungeon Ogre: no A* path to Player; holding position.\n";

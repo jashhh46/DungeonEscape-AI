@@ -30,11 +30,11 @@ namespace ai
     };
 
     template <typename Grid, typename IsCellWalkable, typename CanOccupy,
-              typename HasLineOfSight>
+              typename HasLineOfSight, typename OnAStarSearch = IgnoreAStarObserver>
     sf::Vector2f moveArcher(EnemyContext& context, ArcherPathState& state,
         float deltaTime, const Grid& grid, float tileSize,
         IsCellWalkable isCellWalkable, CanOccupy canOccupy,
-        HasLineOfSight hasLineOfSight)
+        HasLineOfSight hasLineOfSight, OnAStarSearch onAStarSearch = {})
     {
         const auto action = context.currentAction;
         if (action != EnemyContext::Action::Retreat &&
@@ -84,7 +84,8 @@ namespace ai
 
             if (action == EnemyContext::Action::Approach)
             {
-                state.path = findAStarPath(startCell, playerCell, grid, isCellWalkable);
+                state.path = findAStarPathMeasured(startCell, playerCell, grid,
+                    isCellWalkable, onAStarSearch);
                 state.destination = playerCell;
             }
             else
@@ -132,8 +133,8 @@ namespace ai
                             score = std::abs(distance - archerDesiredDistance) / tileSize;
                         }
 
-                        const auto candidatePath = findAStarPath(
-                            startCell, candidate, grid, isCellWalkable);
+                        const auto candidatePath = findAStarPathMeasured(
+                            startCell, candidate, grid, isCellWalkable, onAStarSearch);
                         if (candidatePath.empty())
                             continue;
                         score += static_cast<float>(candidatePath.size()) * 0.01f;

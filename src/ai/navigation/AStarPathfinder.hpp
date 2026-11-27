@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <limits>
 #include <queue>
@@ -9,6 +11,11 @@
 
 namespace ai
 {
+    struct IgnoreAStarObserver
+    {
+        void operator()(bool, std::uint64_t) const {}
+    };
+
     struct GridCell
     {
         int column = 0;
@@ -112,6 +119,18 @@ namespace ai
         if (path.empty() || path.back() != start)
             return {};
         std::reverse(path.begin(), path.end());
+        return path;
+    }
+
+    template <typename Grid, typename IsWalkable, typename Observer>
+    std::vector<GridCell> findAStarPathMeasured(GridCell start, GridCell goal,
+        const Grid& grid, IsWalkable isWalkable, Observer observer)
+    {
+        const auto startTime = std::chrono::steady_clock::now();
+        std::vector<GridCell> path = findAStarPath(start, goal, grid, isWalkable);
+        const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - startTime).count();
+        observer(!path.empty(), static_cast<std::uint64_t>(elapsed));
         return path;
     }
 

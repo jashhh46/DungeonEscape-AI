@@ -14,6 +14,7 @@
 #include "player/PlayerCombat.hpp"
 #include "game/EnemyHealth.hpp"
 #include "game/GameSession.hpp"
+#include "evaluation/EvaluationLogger.hpp"
 #include "ai/enemies/SkeletonCombat.hpp"
 #include "ai/enemies/SkeletonDecision.hpp"
 #include "ai/enemies/SkeletonPathfinding.hpp"
@@ -21,8 +22,12 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <iostream>
+#include <iterator>
 #include <string>
 #include <utility>
 #include <vector>
@@ -1458,6 +1463,137 @@ namespace
         expect(stoppedMovement == sf::Vector2f{ 0.f, 0.f } && state.path.empty(),
                "Skeleton clears its path and stops when Chase is no longer selected");
     }
+
+    void testEvaluationLogger()
+    {
+        const auto stamp = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+        const std::filesystem::path temporaryRoot = std::filesystem::temp_directory_path() /
+            ("DungeonEscapeEvaluationTests_" + std::to_string(stamp));
+        const std::filesystem::path logsDirectory = temporaryRoot / "evaluation" / "logs";
+        std::filesystem::path csvPath;
+        try
+        {
+            {
+                evaluation::EvaluationLogger logger(logsDirectory);
+                expect(logger.enabled() && std::filesystem::exists(logsDirectory),
+                       "Evaluation logger creates its log directory and opens a session CSV");
+                csvPath = logger.outputPath();
+                expect(csvPath.extension() == ".csv" && !logger.sessionId().empty(),
+                       "Evaluation log uses a unique session ID and CSV filename");
+                {
+                    evaluation::EvaluationLogger secondSession(logsDirectory);
+                    expect(secondSession.outputPath() != csvPath &&
+                           secondSession.sessionId() != logger.sessionId(),
+                           "Separate game launches receive separate log files and session IDs");
+                }
+
+                logger.recordBehaviourTreeTick(1.0, "Skeleton Guard", 10);
+                logger.recordBehaviourTreeTick(1.1, "Skeleton Guard", 30);
+                expect(logger.metrics("Skeleton Guard").behaviourTreeTicks == 2 &&
+                       logger.metrics("Skeleton Guard").behaviourTreeTotalMicroseconds == 40 &&
+                       logger.metrics("Skeleton Guard").behaviourTreeMaxMicroseconds == 30,
+                       "Behaviour Tree tick timings accumulate without per-tick event rows");
+
+                expect(logger.recordAction(1.1, "Skeleton Guard", "Chase", 200.f, true) &&
+                       !logger.recordAction(1.2, "Skeleton Guard", "Chase", 199.f, true) &&
+                       logger.recordAction(1.3, "Skeleton Guard", "Attack", 60.f, true),
+                       "Evaluation log records action transitions but suppresses repeated actions");
+                expect(logger.recordAction(1.35, "Skeleton Guard", "Chase, \"evasive\"",
+                           90.f, true),
+                       "Evaluation event strings with commas and quotes are accepted for CSV escaping");
+                logger.recordDetection(1.1, "Skeleton Guard", true, 200.f, true);
+                logger.recordDetection(1.2, "Skeleton Guard", true, 199.f, true);
+                logger.recordDetection(1.4, "Skeleton Guard", false, 390.f, false);
+                logger.recordAStar(1.1, "Skeleton Guard", true, 25);
+                logger.recordAStar(1.2, "Skeleton Guard", false, 12);
+                logger.recordAction(1.3, "Goblin Archer", "Retreat", 150.f, true);
+                logger.recordCombat(1.3, "Skeleton Guard", "attack_attempt", 60.f, true);
+                logger.recordCombat(1.4, "Skeleton Guard", "hit", 58.f, true);
+                logger.recordCombat(1.5, "Skeleton Guard", "miss", 62.f, false);
+                logger.recordCombat(1.5, "Dungeon Ogre", "recovery_started", 80.f, true);
+                const evaluation::EnemyMetrics& beforeRestart = logger.metrics("Skeleton Guard");
+                expect(beforeRestart.aStarCalls == 2 && beforeRestart.aStarSuccesses == 1 &&
+                       beforeRestart.aStarFailures == 1 && beforeRestart.attacks == 1 &&
+                       beforeRestart.hits == 1 && beforeRestart.misses == 1 &&
+                       beforeRestart.detectionsAcquired == 1 && beforeRestart.detectionsLost == 1,
+                       "Evaluation counters distinguish path results, combat outcomes and detection");
+                expect(logger.metrics("Goblin Archer").retreats == 1 &&
+                       logger.metrics("Dungeon Ogre").recoveries == 1,
+                       "Evaluation summaries count Archer retreats and Ogre Recovery events");
+
+                std::array<std::array<int, 2>, 1> pathGrid{};
+                bool measuredSearchCalled = false;
+                bool measuredSearchSucceeded = false;
+                const auto simpleWalkable = [](ai::GridCell cell)
+                {
+                    return cell.column >= 0 && cell.column < 2 && cell.row == 0;
+                };
+                ai::findAStarPathMeasured({ 0, 0 }, { 1, 0 }, pathGrid,
+                    simpleWalkable, [&](bool success, std::uint64_t duration)
+                    {
+                        measuredSearchCalled = true;
+                        measuredSearchSucceeded = success;
+                        (void)duration;
+                    });
+                expect(measuredSearchCalled && measuredSearchSucceeded,
+                       "Measured A* reports the result of a real path request");
+
+                logger.startNewTrial(2.0);
+                expect(logger.trial() == 2 &&
+                       logger.metrics("Skeleton Guard").behaviourTreeTicks == 0 &&
+                       logger.metrics("Skeleton Guard").aStarCalls == 0,
+                       "A new restart trial resets counters instead of mixing runs");
+                logger.recordBehaviourTreeTick(0.1, "Dungeon Ogre", 7);
+            }
+
+            std::ifstream input(csvPath);
+            const std::string csvText((std::istreambuf_iterator<char>(input)),
+                std::istreambuf_iterator<char>());
+            const auto countText = [&csvText](const std::string& value)
+            {
+                std::size_t count = 0;
+                for (std::size_t position = 0;
+                     (position = csvText.find(value, position)) != std::string::npos;
+                     position += value.size())
+                    ++count;
+                return count;
+            };
+            const std::size_t firstRowEnd = csvText.find('\n');
+            const std::size_t secondRowEnd = csvText.find('\n', firstRowEnd + 1);
+            const std::string firstEventRow = csvText.substr(firstRowEnd + 1,
+                secondRowEnd - firstRowEnd - 1);
+            const std::size_t firstEventColumns = static_cast<std::size_t>(
+                std::count(firstEventRow.begin(), firstEventRow.end(), ',')) + 1;
+            expect(csvText.find("timestamp_s,session_id,trial,event,enemy,action,") == 0 &&
+                   csvText.find("astar_success") != std::string::npos &&
+                   csvText.find("astar_failure") != std::string::npos &&
+                   csvText.find("\"Chase, \"\"evasive\"\"\"") != std::string::npos &&
+                   csvText.find("1.100") != std::string::npos &&
+                   firstEventColumns == 22,
+                   "CSV has 22 columns, seconds timestamps, path outcomes and escaped text fields");
+            expect(countText("action_change") == 4 &&
+                   countText("detection_acquired") == 1 && countText("detection_lost") == 1 &&
+                   countText("summary") == 6,
+                   "CSV contains transitions, detection edges and per-enemy trial summaries");
+
+            const std::filesystem::path blocker = temporaryRoot / "not_a_directory";
+            {
+                std::ofstream file(blocker);
+                file << "blocker";
+            }
+            evaluation::EvaluationLogger unavailable(blocker / "logs");
+            unavailable.recordAction(0.1, "Dungeon Ogre", "Chase", 300.f, true);
+            expect(!unavailable.enabled(),
+                   "Unavailable log storage disables logging without throwing");
+        }
+        catch (const std::exception& exception)
+        {
+            expect(false, std::string("Evaluation logger test handled filesystem error: ") +
+                exception.what());
+        }
+        std::error_code cleanupError;
+        std::filesystem::remove_all(temporaryRoot, cleanupError);
+    }
 }
 
 int main()
@@ -1482,6 +1618,7 @@ int main()
     testCentralPassageNavigation();
     testSkeletonCombat();
     testSkeletonPathFollowing();
+    testEvaluationLogger();
 
     std::cout << "\n" << (failures == 0 ? "All tests passed." : "Test failures: ")
               << (failures == 0 ? 0 : failures) << '\n';

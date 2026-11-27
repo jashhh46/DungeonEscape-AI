@@ -26,11 +26,13 @@ namespace ai
         float stuckTime = 0.f;
     };
 
-    template <typename Grid, typename IsCellWalkable, typename CanOccupy>
+    template <typename Grid, typename IsCellWalkable, typename CanOccupy,
+              typename OnAStarSearch = IgnoreAStarObserver>
     sf::Vector2f followOgrePath(EnemyContext& context, OgrePathState& state,
         float deltaTime, const Grid& grid, float tileSize,
         IsCellWalkable isCellWalkable, CanOccupy canOccupy,
-        float waypointGroundOffset = ogreNavigationGroundOffset)
+        float waypointGroundOffset = ogreNavigationGroundOffset,
+        OnAStarSearch onAStarSearch = {})
     {
         if (context.currentAction != EnemyContext::Action::Chase)
         {
@@ -71,7 +73,8 @@ namespace ai
         if (destinationChanged || invalidPath || retryAfterFailure || state.stuckTime >= 0.5f)
         {
             const bool firstAttempt = !state.hasAttempted;
-            state.path = findAStarPath(startCell, goalCell, grid, isCellWalkable);
+            state.path = findAStarPathMeasured(startCell, goalCell, grid,
+                isCellWalkable, onAStarSearch);
             state.destination = goalCell;
             state.lastStart = startCell;
             state.hasAttempted = true;

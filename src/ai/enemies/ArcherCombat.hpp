@@ -86,6 +86,7 @@ namespace ai
         sf::Vector2f velocity{};
         float lifetimeRemaining = archerArrowLifetime;
         bool active = false;
+        bool hitPlayer = false;
     };
 
     inline ArcherProjectile makeArcherProjectile(sf::Vector2f origin,
@@ -147,7 +148,10 @@ namespace ai
                     playerWidth, playerHeight))
                 {
                     if (player.takeDamage(archerArrowDamage))
+                    {
+                        projectile.hitPlayer = true;
                         ++hits;
+                    }
                     projectile.active = false;
                 }
             }
